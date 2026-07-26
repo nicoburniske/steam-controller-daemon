@@ -12,6 +12,8 @@ pub struct Config {
     pub version: u32,
     pub default_mode: String,
     #[serde(default)]
+    pub osk: Osk,
+    #[serde(default)]
     pub global: Global,
     pub modes: IndexMap<String, Mode>,
 }
@@ -49,6 +51,20 @@ impl Config {
                 "invalid configuration: default_mode {:?} does not name a configured mode",
                 self.default_mode
             )));
+        }
+
+        for input in self.osk.bindings.keys() {
+            if matches!(
+                input,
+                Button::LeftPadTouch
+                    | Button::LeftPadClick
+                    | Button::RightPadTouch
+                    | Button::RightPadClick
+            ) {
+                return Err(Error::message(format!(
+                    "invalid configuration: OSK binding input {input:?} is reserved for keyboard pointing"
+                )));
+            }
         }
 
         for (index, binding) in self.global.bindings.iter().enumerate() {
@@ -223,6 +239,31 @@ impl Config {
             )),
             _ => Ok(()),
         }
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct Osk {
+    #[serde(default)]
+    pub bindings: IndexMap<Button, OskKey>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OskKey(KeyCode);
+
+impl OskKey {
+    pub const fn code(self) -> KeyCode {
+        self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for OskKey {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserialize_key(deserializer).map(Self)
     }
 }
 
@@ -456,6 +497,10 @@ mod tests {
                 version = 1
                 default_mode = "desktop"
 
+                [osk.bindings]
+                l4 = "super"
+                left-trigger-click = "shift"
+
                 [[global.bindings]]
                 chord = ["steam", "x"]
                 action = { type = "event", name = "keyboard.toggle" }
@@ -476,6 +521,14 @@ mod tests {
         )
         .unwrap();
 
+        assert_eq!(
+            config.osk.bindings[&Button::L4].code(),
+            KeyCode::KEY_LEFTMETA
+        );
+        assert_eq!(
+            config.osk.bindings[&Button::LeftTriggerClick].code(),
+            KeyCode::KEY_LEFTSHIFT
+        );
         assert_eq!(config.global.bindings[0].chord, [Button::Steam, Button::X]);
         assert_eq!(
             config.modes["desktop"].bindings[0].action,
@@ -502,6 +555,14 @@ mod tests {
                     [modes.one]
                 "#,
                 "duplicate button",
+            ),
+            (
+                r#"
+                    [osk.bindings]
+                    left-pad-click = "enter"
+                    [modes.one]
+                "#,
+                "reserved for keyboard pointing",
             ),
             (
                 r#"

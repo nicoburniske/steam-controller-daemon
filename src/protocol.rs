@@ -152,8 +152,45 @@ pub enum Button {
 }
 
 impl Button {
+    pub const ALL: [Self; 30] = [
+        Self::A,
+        Self::B,
+        Self::X,
+        Self::Y,
+        Self::Qam,
+        Self::R3,
+        Self::View,
+        Self::R4,
+        Self::R5,
+        Self::Rb,
+        Self::DpadDown,
+        Self::DpadRight,
+        Self::DpadLeft,
+        Self::DpadUp,
+        Self::Menu,
+        Self::L3,
+        Self::Steam,
+        Self::L4,
+        Self::L5,
+        Self::Lb,
+        Self::RightStickTouch,
+        Self::RightPadTouch,
+        Self::RightPadClick,
+        Self::RightTriggerClick,
+        Self::LeftStickTouch,
+        Self::LeftPadTouch,
+        Self::LeftPadClick,
+        Self::LeftTriggerClick,
+        Self::RightGripTouch,
+        Self::LeftGripTouch,
+    ];
+
     pub const fn mask(self) -> u32 {
         self as u32
+    }
+
+    pub const fn index(self) -> usize {
+        self.mask().trailing_zeros() as usize
     }
 }
 

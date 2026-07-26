@@ -15,16 +15,6 @@ const TRACKPAD_HAPTIC_MAX_TRAVEL: f32 = 4000.0 / 32767.0;
 const TRACKPAD_HAPTIC_TICK_TRAVEL: f32 = 3200.0 / 32767.0;
 const TRACKPAD_HAPTIC_MIN_INTERVAL_US: u32 = 25_000;
 const TRACKPAD_SCROLL_MIN_RADIUS: f32 = 1.0 / 3.0;
-const OSK_BINDINGS: [(Button, KeyCode); 8] = [
-    (Button::LeftTriggerClick, KeyCode::KEY_LEFTSHIFT),
-    (Button::X, KeyCode::KEY_BACKSPACE),
-    (Button::Y, KeyCode::KEY_SPACE),
-    (Button::RightTriggerClick, KeyCode::KEY_ENTER),
-    (Button::DpadUp, KeyCode::KEY_UP),
-    (Button::DpadDown, KeyCode::KEY_DOWN),
-    (Button::DpadLeft, KeyCode::KEY_LEFT),
-    (Button::DpadRight, KeyCode::KEY_RIGHT),
-];
 const GAMEPAD_AXES: [GamepadAxis; 6] = [
     GamepadAxis::LeftX,
     GamepadAxis::LeftY,
@@ -184,7 +174,16 @@ impl Mapper {
         }
 
         if !mode_changed {
-            for (input, key) in OSK_BINDINGS {
+            for index in 0..self.config.osk.bindings.len() {
+                let (input, key) = {
+                    let (input, key) = self
+                        .config
+                        .osk
+                        .bindings
+                        .get_index(index)
+                        .expect("OSK binding index is valid");
+                    (*input, key.code())
+                };
                 let was_active = self.osk_active.contains(input);
                 let active = keyboard_visible
                     && button_active(input, state)
@@ -430,7 +429,18 @@ impl Mapper {
     }
 
     pub fn keyboard_shifted(&self) -> bool {
-        self.osk_active.contains(Button::LeftTriggerClick)
+        self.config.osk.bindings.iter().any(|(input, key)| {
+            self.osk_active.contains(*input)
+                && matches!(key.code(), KeyCode::KEY_LEFTSHIFT | KeyCode::KEY_RIGHTSHIFT)
+        })
+    }
+
+    pub fn osk_bindings(&self) -> impl Iterator<Item = (Button, KeyCode)> + '_ {
+        self.config
+            .osk
+            .bindings
+            .iter()
+            .map(|(input, key)| (*input, key.code()))
     }
 
     fn mode(&self) -> &crate::config::Mode {
@@ -937,6 +947,9 @@ mod tests {
             r#"
                 version = 1
                 default_mode = "desktop"
+                [osk.bindings]
+                x = "backspace"
+                y = "space"
                 [[global.bindings]]
                 chord = ["steam", "x"]
                 action = { type = "keyboard-toggle" }
@@ -990,12 +1003,29 @@ mod tests {
             r#"
                 version = 1
                 default_mode = "desktop"
+                [osk.bindings]
+                l4 = "super"
+                l5 = "shift"
+                r4 = "control"
+                r5 = "alt"
+                left-trigger-click = "shift"
+                right-trigger-click = "enter"
+                x = "backspace"
+                y = "space"
+                dpad-up = "up"
+                dpad-down = "down"
+                dpad-left = "left"
+                dpad-right = "right"
                 [modes.desktop]
             "#,
         )
         .unwrap();
         let mut mapper = Mapper::new(config);
         let held = state_with(&[
+            ProtocolButton::L4,
+            ProtocolButton::L5,
+            ProtocolButton::R4,
+            ProtocolButton::R5,
             ProtocolButton::LeftTriggerClick,
             ProtocolButton::X,
             ProtocolButton::Y,
@@ -1006,10 +1036,13 @@ mod tests {
             ProtocolButton::DpadRight,
         ]);
         let mut expected = [
+            KeyCode::KEY_LEFTMETA,
             KeyCode::KEY_LEFTSHIFT,
+            KeyCode::KEY_LEFTCTRL,
+            KeyCode::KEY_LEFTALT,
+            KeyCode::KEY_ENTER,
             KeyCode::KEY_BACKSPACE,
             KeyCode::KEY_SPACE,
-            KeyCode::KEY_ENTER,
             KeyCode::KEY_UP,
             KeyCode::KEY_DOWN,
             KeyCode::KEY_LEFT,

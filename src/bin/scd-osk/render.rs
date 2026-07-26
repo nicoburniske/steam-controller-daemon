@@ -1,4 +1,4 @@
-use crate::keyboard::{ControllerHint, Half, Keyboard};
+use crate::keyboard::{Half, Keyboard};
 use blit::{
     RepaintBuffer, Runtime,
     color::Color,
@@ -12,7 +12,9 @@ use blit::{
     widget::Button,
 };
 use blit_cpu::{Font, FontFace, Renderer, RendererConfig, Scanline, VecBuffer};
-use scd::{Error, Result, ResultExt};
+use evdev::KeyCode;
+use scd::{ControllerButton, Error, Result, ResultExt};
+use std::hash::Hash;
 use std::time::Duration;
 
 pub struct KeyboardRenderer {
@@ -24,6 +26,14 @@ pub struct KeyboardRenderer {
 
 struct BlitPlatform {
     renderer: Renderer<VecBuffer<u32>, Scanline>,
+}
+
+#[derive(Clone, Copy)]
+enum ControllerHint {
+    Face(&'static str),
+    Trigger(&'static str),
+    Paddle(&'static str),
+    Control(&'static str),
 }
 
 impl KeyboardRenderer {
@@ -108,12 +118,73 @@ impl KeyboardRenderer {
                 .uniform_radius(5.0)
                 .render(ui);
 
+            let bindings = keyboard.bindings();
+            let paddle_count = [
+                ControllerButton::L4,
+                ControllerButton::L5,
+                ControllerButton::R4,
+                ControllerButton::R5,
+            ]
+            .into_iter()
+            .filter(|input| bindings.get(*input).and_then(Keyboard::key_label).is_some())
+            .count();
+            let legend_height = if paddle_count == 0 { 0.0 } else { 34.0 };
             let grid = LogicalRect {
                 x: panel.x + 5.0,
-                y: panel.y + 5.0,
+                y: panel.y + 5.0 + legend_height,
                 width: (panel.width - 10.0).max(0.0),
-                height: (panel.height - 10.0).max(0.0),
+                height: (panel.height - 10.0 - legend_height).max(0.0),
             };
+            if paddle_count != 0 {
+                let width = (grid.width / paddle_count as f32).min(180.0);
+                let mut x = grid.x + (grid.width - width * paddle_count as f32) * 0.5;
+                for input in [
+                    ControllerButton::L4,
+                    ControllerButton::L5,
+                    ControllerButton::R4,
+                    ControllerButton::R5,
+                ] {
+                    let Some(key) = bindings.get(input) else {
+                        continue;
+                    };
+                    let Some(label) = Keyboard::key_label(key) else {
+                        continue;
+                    };
+                    let area = LogicalRect {
+                        x: x + 2.0,
+                        y: panel.y + 7.0,
+                        width: (width - 4.0).max(0.0),
+                        height: 30.0,
+                    };
+                    Button::new(label)
+                        .id(("modifier", input))
+                        .background(Color::from_rgba8(14, 20, 27, 255))
+                        .text_color(Color::WHITE)
+                        .uniform_radius(3.0)
+                        .padding_x(40.0)
+                        .padding_y(2.0)
+                        .text_size(14.0)
+                        .text_weight(600)
+                        .text_options(TextOptions {
+                            horizontal_align: HorizontalAlign::Center,
+                            vertical_align: VerticalAlign::Center,
+                            ..Default::default()
+                        })
+                        .render(ui, area);
+                    render_hint(
+                        ui,
+                        ControllerHint::from(input).expect("paddles have keyboard hints"),
+                        ("modifier hint", input),
+                        LogicalRect {
+                            x: area.x + 6.0,
+                            y: area.y + 3.0,
+                            width: 36.0,
+                            height: 24.0,
+                        },
+                    );
+                    x += width;
+                }
+            }
             let pointers = [Half::Left, Half::Right].map(|half| {
                 let inset_x = 19.0_f32.min(grid.width * 0.5);
                 let inset_y = 19.0_f32.min(grid.height * 0.5);
@@ -134,7 +205,7 @@ impl KeyboardRenderer {
             keyboard.for_each_key(
                 grid.width,
                 grid.height,
-                |slot, primary, secondary, hint, [x, y, width, height], active, special| {
+                |slot, primary, secondary, target, [x, y, width, height], active, special| {
                     let cell = LogicalRect {
                         x: grid.x + x,
                         y: grid.y + y,
@@ -215,46 +286,36 @@ impl KeyboardRenderer {
                                 },
                             );
                     }
-                    if let Some(hint) = hint {
-                        let (hint, face_button) = match hint {
-                            ControllerHint::X => ("X", true),
-                            ControllerHint::Y => ("Y", true),
-                            ControllerHint::LeftTrigger => ("LT", false),
-                            ControllerHint::RightTrigger => ("RT", false),
-                        };
-                        let hint_width = if face_button { 24.0 } else { 36.0 };
-                        let hint_height = 24.0;
-                        Button::new(hint)
-                            .id((slot, "hint"))
-                            .background(if face_button {
-                                Color::from_rgba8(26, 159, 255, 255)
-                            } else {
-                                Color::from_rgba8(222, 226, 232, 255)
-                            })
-                            .text_color(if face_button {
-                                Color::WHITE
-                            } else {
-                                Color::from_rgba8(14, 20, 27, 255)
-                            })
-                            .uniform_radius(if face_button { 12.0 } else { 4.0 })
-                            .padding_x(0.0)
-                            .padding_y(0.0)
-                            .text_size(11.0)
-                            .text_weight(600)
-                            .text_options(TextOptions {
-                                horizontal_align: HorizontalAlign::Center,
-                                vertical_align: VerticalAlign::Center,
-                                ..Default::default()
-                            })
-                            .render(
+                    if let Some(target) = target {
+                        let mut hint_x = key.x + 6.0;
+                        for (input, configured) in bindings.iter() {
+                            let same_key = configured == target
+                                || matches!(target, KeyCode::KEY_LEFTSHIFT)
+                                    && matches!(
+                                        configured,
+                                        KeyCode::KEY_LEFTSHIFT | KeyCode::KEY_RIGHTSHIFT
+                                    );
+                            let Some(hint) = same_key
+                                .then(|| ControllerHint::from(input))
+                                .flatten()
+                                .filter(|hint| !matches!(hint, ControllerHint::Paddle(_)))
+                            else {
+                                continue;
+                            };
+                            let width = hint.width();
+                            render_hint(
                                 ui,
+                                hint,
+                                (slot, input),
                                 LogicalRect {
-                                    x: key.x + 6.0,
-                                    y: key.y + (key.height - hint_height) * 0.5,
-                                    width: hint_width,
-                                    height: hint_height,
+                                    x: hint_x,
+                                    y: key.y + (key.height - 24.0) * 0.5,
+                                    width,
+                                    height: 24.0,
                                 },
                             );
+                            hint_x += width + 4.0;
+                        }
                     }
                 },
             );
@@ -297,6 +358,92 @@ impl KeyboardRenderer {
     pub fn physical_size(&self) -> [u32; 2] {
         self.physical_size
     }
+}
+
+impl ControllerHint {
+    fn from(input: ControllerButton) -> Option<Self> {
+        Some(match input {
+            ControllerButton::A => Self::Face("A"),
+            ControllerButton::B => Self::Face("B"),
+            ControllerButton::X => Self::Face("X"),
+            ControllerButton::Y => Self::Face("Y"),
+            ControllerButton::LeftTriggerClick => Self::Trigger("LT"),
+            ControllerButton::RightTriggerClick => Self::Trigger("RT"),
+            ControllerButton::L4 => Self::Paddle("L4"),
+            ControllerButton::L5 => Self::Paddle("L5"),
+            ControllerButton::R4 => Self::Paddle("R4"),
+            ControllerButton::R5 => Self::Paddle("R5"),
+            ControllerButton::DpadUp
+            | ControllerButton::DpadDown
+            | ControllerButton::DpadLeft
+            | ControllerButton::DpadRight => return None,
+            ControllerButton::Qam => Self::Control("QAM"),
+            ControllerButton::R3 => Self::Control("R3"),
+            ControllerButton::View => Self::Control("View"),
+            ControllerButton::Rb => Self::Control("RB"),
+            ControllerButton::Menu => Self::Control("Menu"),
+            ControllerButton::L3 => Self::Control("L3"),
+            ControllerButton::Steam => Self::Control("Steam"),
+            ControllerButton::Lb => Self::Control("LB"),
+            ControllerButton::RightStickTouch => Self::Control("RST"),
+            ControllerButton::RightPadTouch => Self::Control("RPT"),
+            ControllerButton::RightPadClick => Self::Control("RPC"),
+            ControllerButton::LeftStickTouch => Self::Control("LST"),
+            ControllerButton::LeftPadTouch => Self::Control("LPT"),
+            ControllerButton::LeftPadClick => Self::Control("LPC"),
+            ControllerButton::RightGripTouch => Self::Control("RGT"),
+            ControllerButton::LeftGripTouch => Self::Control("LGT"),
+        })
+    }
+
+    fn width(self) -> f32 {
+        match self {
+            Self::Face(_) => 24.0,
+            Self::Trigger(_) | Self::Paddle(_) => 36.0,
+            Self::Control(_) => 44.0,
+        }
+    }
+}
+
+fn render_hint(ui: &mut blit::Ui, hint: ControllerHint, id: impl Hash, area: LogicalRect) {
+    let (label, background, text, radius) = match hint {
+        ControllerHint::Face(label) => (
+            label,
+            Color::from_rgba8(26, 159, 255, 255),
+            Color::WHITE,
+            12.0,
+        ),
+        ControllerHint::Trigger(label) => (
+            label,
+            Color::from_rgba8(222, 226, 232, 255),
+            Color::from_rgba8(14, 20, 27, 255),
+            4.0,
+        ),
+        ControllerHint::Paddle(label) => (
+            label,
+            Color::from_rgba8(83, 91, 104, 255),
+            Color::WHITE,
+            4.0,
+        ),
+        ControllerHint::Control(label) => {
+            (label, Color::from_rgba8(54, 60, 70, 255), Color::WHITE, 4.0)
+        }
+    };
+    Button::new(label)
+        .id(id)
+        .background(background)
+        .text_color(text)
+        .uniform_radius(radius)
+        .padding_x(0.0)
+        .padding_y(0.0)
+        .text_size(11.0)
+        .text_weight(600)
+        .text_options(TextOptions {
+            horizontal_align: HorizontalAlign::Center,
+            vertical_align: VerticalAlign::Center,
+            ..Default::default()
+        })
+        .render(ui, area);
 }
 
 impl PlatformImpl for BlitPlatform {

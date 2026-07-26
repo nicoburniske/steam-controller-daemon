@@ -1,4 +1,6 @@
+use crate::protocol::Button;
 use crate::{Error, Result, ResultExt};
+use evdev::KeyCode;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{BufRead, BufReader, BufWriter, Write};
@@ -28,12 +30,30 @@ pub struct OskState {
     pub visible: bool,
     #[serde(default)]
     pub shift_held: bool,
+    #[serde(default)]
+    bindings: OskBindings,
     pub left: OskPad,
     pub right: OskPad,
     session: u64,
     click_sequence: u64,
     click_history_len: u8,
     click_history: [OskClick; OSK_CLICK_HISTORY_LEN],
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OskBindings([u16; Button::ALL.len()]);
+
+impl OskBindings {
+    pub fn get(&self, input: Button) -> Option<KeyCode> {
+        let code = self.0[input.index()];
+        (code != 0).then(|| KeyCode::new(code))
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (Button, KeyCode)> + '_ {
+        Button::ALL
+            .into_iter()
+            .filter_map(|input| self.get(input).map(|key| (input, key)))
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
@@ -148,6 +168,17 @@ impl OskState {
 
     pub fn session(&self) -> u64 {
         self.session
+    }
+
+    pub fn bindings(&self) -> OskBindings {
+        self.bindings
+    }
+
+    pub fn set_bindings(&mut self, bindings: impl IntoIterator<Item = (Button, KeyCode)>) {
+        self.bindings.0.fill(0);
+        for (input, key) in bindings {
+            self.bindings.0[input.index()] = key.code();
+        }
     }
 
     pub fn update_pad(&mut self, side: OskPadSide, mut pad: OskPad, record_rising_edge: bool) {
@@ -498,6 +529,30 @@ mod tests {
         assert_eq!(clicks.next().map(|click| click.sequence), Some(0));
         assert_eq!(clicks.next(), None);
         assert_eq!(state.click_cursor(), 1);
+    }
+
+    #[test]
+    fn osk_bindings_replace_previous_keys() {
+        let mut state = OskState::default();
+        state.set_bindings([
+            (Button::L4, KeyCode::KEY_LEFTMETA),
+            (Button::X, KeyCode::KEY_BACKSPACE),
+        ]);
+        assert_eq!(
+            state.bindings().get(Button::L4),
+            Some(KeyCode::KEY_LEFTMETA)
+        );
+        assert_eq!(
+            state.bindings().get(Button::X),
+            Some(KeyCode::KEY_BACKSPACE)
+        );
+
+        state.set_bindings([(Button::L4, KeyCode::KEY_LEFTCTRL)]);
+        assert_eq!(
+            state.bindings().get(Button::L4),
+            Some(KeyCode::KEY_LEFTCTRL)
+        );
+        assert_eq!(state.bindings().get(Button::X), None);
     }
 
     #[test]

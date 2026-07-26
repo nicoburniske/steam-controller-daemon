@@ -3,9 +3,10 @@ mod render;
 mod wayland;
 
 use clap::Parser;
+use evdev::KeyCode;
 use keyboard::Keyboard;
 use render::KeyboardRenderer;
-use scd::{Error, OskPad, OskState, Result, ResultExt};
+use scd::{ControllerButton, Error, OskPad, OskState, Result, ResultExt};
 use std::{
     fs,
     io::{BufWriter, Write},
@@ -42,6 +43,16 @@ fn main() -> Result<()> {
         let (keys, _) = mpsc::channel();
         let mut state = OskState::default();
         state.set_visible(true);
+        state.set_bindings([
+            (ControllerButton::L4, KeyCode::KEY_LEFTMETA),
+            (ControllerButton::L5, KeyCode::KEY_LEFTSHIFT),
+            (ControllerButton::R4, KeyCode::KEY_LEFTCTRL),
+            (ControllerButton::R5, KeyCode::KEY_LEFTALT),
+            (ControllerButton::LeftTriggerClick, KeyCode::KEY_LEFTSHIFT),
+            (ControllerButton::RightTriggerClick, KeyCode::KEY_ENTER),
+            (ControllerButton::X, KeyCode::KEY_BACKSPACE),
+            (ControllerButton::Y, KeyCode::KEY_SPACE),
+        ]);
         state.left = OskPad {
             touched: true,
             pressed: true,

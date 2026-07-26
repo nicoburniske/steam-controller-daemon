@@ -35,6 +35,8 @@ impl Daemon {
         let (command_sender, commands) = mpsc::sync_channel(32);
         let (_server, events, osk) = Server::bind(&self.socket_path, command_sender)?;
         let mut keyboard = OskState::default();
+        keyboard.set_bindings(mapper.osk_bindings());
+        osk.send_replace(keyboard);
         let mut keyboard_closed_at: Option<Instant> = None;
         let mut battery = None;
         let mut charging = None;
@@ -91,6 +93,9 @@ impl Daemon {
                     Request::Reload => match Config::load(&self.config_path) {
                         Ok(config) => match mapper.reload(config, &mut mapped) {
                             Ok(()) => {
+                                keyboard.set_bindings(mapper.osk_bindings());
+                                keyboard.shift_held = mapper.keyboard_shifted();
+                                osk.send_replace(keyboard);
                                 Self::emit(
                                     &mut mapped,
                                     &mut mapper,

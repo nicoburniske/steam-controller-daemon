@@ -10,6 +10,8 @@ mod runtime;
 pub use config::Config;
 pub use error::{Error, Result, ResultExt};
 pub use ipc::{
-    Client, EventStream, NamedEvent, OskClick, OskPad, OskPadSide, OskState, OskStream, Status,
+    Client, EventStream, NamedEvent, OskBindings, OskClick, OskPad, OskPadSide, OskState,
+    OskStream, Status,
 };
+pub use protocol::Button as ControllerButton;
 pub use runtime::Daemon;

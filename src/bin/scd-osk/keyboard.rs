@@ -1,5 +1,5 @@
 use evdev::KeyCode;
-use scd::{OskPadSide, OskState};
+use scd::{OskBindings, OskPadSide, OskState};
 use std::sync::mpsc::Sender;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -18,14 +18,6 @@ pub enum KeyboardOutput {
 pub enum Half {
     Left,
     Right,
-}
-
-#[derive(Clone, Copy)]
-pub enum ControllerHint {
-    X,
-    Y,
-    LeftTrigger,
-    RightTrigger,
 }
 
 impl Half {
@@ -52,6 +44,7 @@ pub struct Keyboard {
     page: Page,
     shifted: bool,
     shift_held: bool,
+    bindings: OskBindings,
     pointers: [Option<[f32; 2]>; 2],
     pressed: [bool; 2],
     click_cursor: u64,
@@ -70,7 +63,6 @@ enum Page {
 struct Key {
     label: &'static str,
     shifted_label: Option<&'static str>,
-    hint: Option<ControllerHint>,
     action: Action,
     weight: u8,
 }
@@ -95,7 +87,6 @@ macro_rules! character {
         Key {
             label: $label,
             shifted_label: Some($shifted),
-            hint: None,
             action: Action::Key {
                 code: KeyCode::$code,
                 shift: Shift::Latch,
@@ -110,7 +101,6 @@ macro_rules! key {
         Key {
             label: $label,
             shifted_label: None,
-            hint: None,
             action: Action::Key {
                 code: KeyCode::$code,
                 shift: Shift::Never,
@@ -122,7 +112,6 @@ macro_rules! key {
         Key {
             label: $label,
             shifted_label: None,
-            hint: None,
             action: Action::Key {
                 code: KeyCode::$code,
                 shift: Shift::Always,
@@ -134,22 +123,6 @@ macro_rules! key {
         Key {
             label: $label,
             shifted_label: None,
-            hint: None,
-            action: Action::Key {
-                code: KeyCode::$code,
-                shift: Shift::Never,
-            },
-            weight: $weight,
-        }
-    };
-}
-
-macro_rules! hinted_key {
-    ($label:literal, $hint:expr, $code:ident, $weight:literal) => {
-        Key {
-            label: $label,
-            shifted_label: None,
-            hint: Some($hint),
             action: Action::Key {
                 code: KeyCode::$code,
                 shift: Shift::Never,
@@ -162,7 +135,6 @@ macro_rules! hinted_key {
 const SHIFT: Key = Key {
     label: "Shift",
     shifted_label: None,
-    hint: Some(ControllerHint::LeftTrigger),
     action: Action::Shift,
     weight: 20,
 };
@@ -170,25 +142,22 @@ const CAPS: Key = key!("Caps", KEY_CAPSLOCK, 16);
 const SYMBOLS: Key = Key {
     label: "?123",
     shifted_label: None,
-    hint: None,
     action: Action::Page(Page::Symbols),
     weight: 14,
 };
 const ALPHABET: Key = Key {
     label: "ABC",
     shifted_label: None,
-    hint: None,
     action: Action::Page(Page::Letters),
     weight: 14,
 };
 const TAB: Key = key!("Tab", KEY_TAB, 14);
-const SPACE: Key = hinted_key!("Space", ControllerHint::Y, KEY_SPACE, 60);
-const BACKSPACE: Key = hinted_key!("Backspace", ControllerHint::X, KEY_BACKSPACE, 14);
-const ENTER: Key = hinted_key!("Enter", ControllerHint::RightTrigger, KEY_ENTER, 17);
+const SPACE: Key = key!("Space", KEY_SPACE, 60);
+const BACKSPACE: Key = key!("Backspace", KEY_BACKSPACE, 14);
+const ENTER: Key = key!("Enter", KEY_ENTER, 17);
 const CLOSE: Key = Key {
     label: "Close",
     shifted_label: None,
-    hint: None,
     action: Action::Close,
     weight: 14,
 };
@@ -318,6 +287,7 @@ impl Keyboard {
             self.page,
             self.shifted,
             self.shift_held,
+            self.bindings,
             self.pointers,
             self.pressed,
         );
@@ -399,12 +369,14 @@ impl Keyboard {
             [false, false]
         };
         self.shift_held = state.visible && state.shift_held;
+        self.bindings = state.bindings();
         self.visible = state.visible;
         before
             != (
                 self.page,
                 self.shifted,
                 self.shift_held,
+                self.bindings,
                 self.pointers,
                 self.pressed,
             )
@@ -429,7 +401,7 @@ impl Keyboard {
             Slot,
             &'static str,
             Option<&'static str>,
-            Option<ControllerHint>,
+            Option<KeyCode>,
             [f32; 4],
             bool,
             bool,
@@ -453,6 +425,11 @@ impl Keyboard {
                 let active = matches!(key.action, Action::Shift) && shifted;
                 let special = matches!(key.action, Action::Shift | Action::Page(_) | Action::Close)
                     || key.label.len() > 2;
+                let target = match key.action {
+                    Action::Key { code, .. } => Some(code),
+                    Action::Shift => Some(KeyCode::KEY_LEFTSHIFT),
+                    Action::Page(_) | Action::Close => None,
+                };
                 visit(
                     Slot {
                         row: row_index as u8,
@@ -460,7 +437,7 @@ impl Keyboard {
                     },
                     label,
                     secondary_label,
-                    key.hint,
+                    target,
                     [x, row_index as f32 * row_height, key_width, row_height],
                     active,
                     special,
@@ -476,6 +453,32 @@ impl Keyboard {
 
     pub fn pressed(&self, half: Half) -> bool {
         self.pressed[usize::from(half == Half::Right)]
+    }
+
+    pub fn bindings(&self) -> OskBindings {
+        self.bindings
+    }
+
+    pub fn key_label(code: KeyCode) -> Option<&'static str> {
+        match code {
+            KeyCode::KEY_LEFTMETA | KeyCode::KEY_RIGHTMETA => Some("Super"),
+            KeyCode::KEY_LEFTCTRL | KeyCode::KEY_RIGHTCTRL => Some("Ctrl"),
+            KeyCode::KEY_LEFTSHIFT | KeyCode::KEY_RIGHTSHIFT => Some("Shift"),
+            KeyCode::KEY_LEFTALT | KeyCode::KEY_RIGHTALT => Some("Alt"),
+            KeyCode::KEY_ESC => Some("Esc"),
+            KeyCode::KEY_UP => Some("Up"),
+            KeyCode::KEY_DOWN => Some("Down"),
+            KeyCode::KEY_LEFT => Some("Left"),
+            KeyCode::KEY_RIGHT => Some("Right"),
+            _ => LETTERS_PAGE
+                .into_iter()
+                .chain(SYMBOLS_PAGE)
+                .flatten()
+                .find_map(|key| match key.action {
+                    Action::Key { code: target, .. } if target == code => Some(key.label),
+                    _ => None,
+                }),
+        }
     }
 }
 
@@ -626,6 +629,13 @@ mod tests {
         assert!(keyboard.update(state, &sender));
         assert_eq!(keyboard.pointer(Half::Left), Some([-0.8, -0.5]));
         assert!(!keyboard.update(state, &sender));
+
+        state.set_bindings([(scd::ControllerButton::X, KeyCode::KEY_BACKSPACE)]);
+        assert!(keyboard.update(state, &sender));
+        assert_eq!(
+            keyboard.bindings().get(scd::ControllerButton::X),
+            Some(KeyCode::KEY_BACKSPACE)
+        );
 
         state.left.position[0] = -0.7;
         assert!(keyboard.update(state, &sender));
