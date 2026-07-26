@@ -1,6 +1,7 @@
 use crate::protocol::{
     ControllerState, PROTEUS_PRODUCT_ID, Report, Trackpad, VALVE_VENDOR_ID, imu_mode_report,
-    lizard_mode_report, parse_report, rumble_report, trackpad_haptic_report,
+    lizard_mode_report, parse_report, rumble_report, trackpad_click_pressure_report,
+    trackpad_haptic_report,
 };
 use hidapi::{HidApi, HidDevice};
 use std::ffi::CString;
@@ -12,6 +13,7 @@ pub struct DeviceManager {
     api: HidApi,
     slots: Vec<Slot>,
     active: Option<usize>,
+    trackpad_click_pressure: u16,
     last_state: Option<Instant>,
     last_scan: Instant,
 }
@@ -29,12 +31,13 @@ struct Slot {
 }
 
 impl DeviceManager {
-    pub fn new() -> Result<Self> {
+    pub fn new(trackpad_click_pressure: u16) -> Result<Self> {
         let api = HidApi::new().whence()?;
         let mut manager = Self {
             api,
             slots: Vec::new(),
             active: None,
+            trackpad_click_pressure,
             last_state: None,
             last_scan: Instant::now() - Duration::from_secs(2),
         };
@@ -83,6 +86,15 @@ impl DeviceManager {
                                     .device
                                     .send_feature_report(&imu_mode_report(true))
                                     .whence()?;
+                                for pad in [Trackpad::Left, Trackpad::Right] {
+                                    self.slots[index]
+                                        .device
+                                        .send_feature_report(&trackpad_click_pressure_report(
+                                            pad,
+                                            self.trackpad_click_pressure,
+                                        ))
+                                        .whence()?;
+                                }
                                 log::info!(
                                     "controller connected on puck interface {}",
                                     self.slots[index].interface
@@ -136,6 +148,19 @@ impl DeviceManager {
         Ok(())
     }
 
+    pub fn set_trackpad_click_pressure(&mut self, pressure: u16) -> Result<()> {
+        self.trackpad_click_pressure = pressure;
+        if let Some(active) = self.active {
+            for pad in [Trackpad::Left, Trackpad::Right] {
+                self.slots[active]
+                    .device
+                    .send_feature_report(&trackpad_click_pressure_report(pad, pressure))
+                    .whence()?;
+            }
+        }
+        Ok(())
+    }
+
     pub fn rumble(&self, low_frequency: u16, high_frequency: u16) -> Result<()> {
         if let Some(active) = self.active {
             self.slots[active]
@@ -146,11 +171,11 @@ impl DeviceManager {
         Ok(())
     }
 
-    pub fn trackpad_haptic(&self, trackpad: Trackpad) -> Result<()> {
+    pub fn trackpad_haptic(&self, trackpad: Trackpad, click: bool) -> Result<()> {
         if let Some(active) = self.active {
             self.slots[active]
                 .device
-                .write(&trackpad_haptic_report(trackpad))
+                .write(&trackpad_haptic_report(trackpad, click))
                 .whence()?;
         }
         Ok(())

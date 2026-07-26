@@ -15,6 +15,8 @@ pub struct Config {
     pub version: u32,
     pub default_mode: String,
     #[serde(default)]
+    pub trackpads: Trackpads,
+    #[serde(default)]
     pub osk: Osk,
     #[serde(default)]
     pub global: Global,
@@ -54,6 +56,11 @@ impl Config {
                 "invalid configuration: default_mode {:?} does not name a configured mode",
                 self.default_mode
             )));
+        }
+        if self.trackpads.click_pressure > 100 {
+            return Err(Error::message(
+                "invalid configuration: trackpads.click_pressure must be in [0, 100]",
+            ));
         }
 
         for input in self.osk.bindings.keys() {
@@ -234,6 +241,25 @@ impl Config {
             _ => Ok(()),
         }
     }
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct Trackpads {
+    #[serde(default = "default_click_pressure")]
+    pub click_pressure: u16,
+}
+
+impl Default for Trackpads {
+    fn default() -> Self {
+        Self {
+            click_pressure: default_click_pressure(),
+        }
+    }
+}
+
+const fn default_click_pressure() -> u16 {
+    25
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]

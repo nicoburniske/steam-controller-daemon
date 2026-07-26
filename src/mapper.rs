@@ -65,6 +65,7 @@ pub enum Output {
     },
     TrackpadHaptic {
         pad: Trackpad,
+        click: bool,
     },
     KeyboardToggle,
     Event {
@@ -366,13 +367,23 @@ impl Mapper {
                 (Trackpad::Left, state.left_pad),
                 (Trackpad::Right, state.right_pad),
             ] {
-                if trackpad_haptic(
-                    &mut self.trackpad_haptics[pad as usize],
-                    pad_state,
-                    state.format,
-                    timestamp_us,
-                ) {
-                    outputs.push(Output::TrackpadHaptic { pad });
+                let click = button_pressed(
+                    match pad {
+                        Trackpad::Left => Button::LeftPadClick,
+                        Trackpad::Right => Button::RightPadClick,
+                    },
+                    state,
+                    self.previous.as_ref(),
+                );
+                if click
+                    || trackpad_haptic(
+                        &mut self.trackpad_haptics[pad as usize],
+                        pad_state,
+                        state.format,
+                        timestamp_us,
+                    )
+                {
+                    outputs.push(Output::TrackpadHaptic { pad, click });
                 }
             }
         }
@@ -1462,7 +1473,8 @@ mod tests {
         state.imu_timestamp_us = 60_000;
         assert!(
             mapped(&mut mapper, &state).contains(&Output::TrackpadHaptic {
-                pad: Trackpad::Right
+                pad: Trackpad::Right,
+                click: false,
             })
         );
     }

@@ -33,8 +33,23 @@ pub fn rumble_report(low_frequency: u16, high_frequency: u16) -> [u8; 10] {
     report
 }
 
-pub fn trackpad_haptic_report(trackpad: Trackpad) -> [u8; 4] {
-    [0x82, trackpad as u8, 1, (-15_i8) as u8]
+pub fn trackpad_click_pressure_report(trackpad: Trackpad, pressure: u16) -> [u8; 64] {
+    setting_report(
+        match trackpad {
+            Trackpad::Left => 52,
+            Trackpad::Right => 53,
+        },
+        pressure,
+    )
+}
+
+pub fn trackpad_haptic_report(trackpad: Trackpad, click: bool) -> [u8; 4] {
+    [
+        0x82,
+        trackpad as u8,
+        if click { 2 } else { 1 },
+        (-15_i8) as u8,
+    ]
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -393,7 +408,21 @@ mod tests {
             rumble_report(0x1234, 0x5678),
             [0x80, 0, 0, 0, 0x34, 0x12, 0, 0x78, 0x56, 0]
         );
-        assert_eq!(trackpad_haptic_report(Trackpad::Left), [0x82, 0, 1, 0xf1]);
-        assert_eq!(trackpad_haptic_report(Trackpad::Right), [0x82, 1, 1, 0xf1]);
+        assert_eq!(
+            &trackpad_click_pressure_report(Trackpad::Left, 25)[..6],
+            &[1, 0x87, 3, 52, 25, 0]
+        );
+        assert_eq!(
+            &trackpad_click_pressure_report(Trackpad::Right, 25)[..6],
+            &[1, 0x87, 3, 53, 25, 0]
+        );
+        assert_eq!(
+            trackpad_haptic_report(Trackpad::Left, false),
+            [0x82, 0, 1, 0xf1]
+        );
+        assert_eq!(
+            trackpad_haptic_report(Trackpad::Right, true),
+            [0x82, 1, 2, 0xf1]
+        );
     }
 }

@@ -24,10 +24,11 @@ impl Daemon {
 
     pub fn run(self) -> Result<()> {
         let config = Config::load(&self.config_path)?;
+        let trackpad_click_pressure = config.trackpads.click_pressure;
         let mut mapper = Mapper::new(config);
         let mut mapped = Vec::new();
         let mut outputs = Outputs::new()?;
-        let mut device = DeviceManager::new()?;
+        let mut device = DeviceManager::new(trackpad_click_pressure)?;
         let (ipc, commands) = Server::bind(&self.socket_path)?;
         let mut keyboard = OskState::default();
         keyboard.set_bindings(mapper.osk_bindings());
@@ -87,6 +88,7 @@ impl Daemon {
                     }
                     Request::Reload => match Config::load(&self.config_path) {
                         Ok(config) => {
+                            device.set_trackpad_click_pressure(config.trackpads.click_pressure)?;
                             mapper.reload(config, &mut mapped);
                             keyboard.set_bindings(mapper.osk_bindings());
                             Self::emit(
@@ -260,7 +262,7 @@ impl Daemon {
                     ipc.publish_event(name);
                 }
                 Output::ModeChanged { name } => log::info!("active mode: {name}"),
-                Output::TrackpadHaptic { pad } => device.trackpad_haptic(pad)?,
+                Output::TrackpadHaptic { pad, click } => device.trackpad_haptic(pad, click)?,
                 output => outputs.emit(&output)?,
             }
         }
