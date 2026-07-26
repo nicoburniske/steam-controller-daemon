@@ -234,7 +234,7 @@ impl KeyboardRenderer {
                             (slot, input),
                             LogicalRect {
                                 x: if primary == "Space" {
-                                    key.x + (key.width - hint_width) * 0.5
+                                    key.x + 8.0
                                 } else if left_side {
                                     key.x + key.width - hint_width - 8.0
                                 } else {
