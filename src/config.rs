@@ -345,8 +345,8 @@ where
     D: Deserializer<'de>,
 {
     let name = String::deserialize(deserializer)?;
-    let normalized = name.trim().to_ascii_lowercase();
-    let key = match normalized.as_str() {
+    let name = name.trim();
+    let key = match name {
         "enter" | "return" => KeyCode::KEY_ENTER,
         "escape" | "esc" => KeyCode::KEY_ESC,
         "space" => KeyCode::KEY_SPACE,
@@ -360,18 +360,18 @@ where
         "left" => KeyCode::KEY_LEFT,
         "right" => KeyCode::KEY_RIGHT,
         _ => {
-            let code = if normalized.starts_with("key_") || normalized.starts_with("btn_") {
-                normalized.to_ascii_uppercase()
-            } else {
-                format!(
-                    "KEY_{}",
-                    normalized
-                        .chars()
-                        .filter(|character| !matches!(character, '-' | '_'))
-                        .flat_map(char::to_uppercase)
-                        .collect::<String>()
-                )
-            };
+            let prefixed = name.get(..4).is_some_and(|prefix| {
+                prefix.eq_ignore_ascii_case("key_") || prefix.eq_ignore_ascii_case("btn_")
+            });
+            let mut code = String::with_capacity(name.len() + 4);
+            if !prefixed {
+                code.push_str("KEY_");
+            }
+            for character in name.chars() {
+                if prefixed || !matches!(character, '-' | '_') {
+                    code.extend(character.to_uppercase());
+                }
+            }
             KeyCode::from_str(&code)
                 .map_err(|_| serde::de::Error::custom(format!("unknown key {name:?}")))?
         }

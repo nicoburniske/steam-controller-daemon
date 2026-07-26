@@ -172,6 +172,7 @@ impl Mapper {
                     .any(|(layer_index, layer)| {
                         let held = digital_active(&layer.hold, state);
                         (held
+                            && !binding.consume
                             && binding
                                 .input
                                 .iter()
@@ -256,7 +257,8 @@ impl Mapper {
                     .get_index(layer_index)
                     .unwrap()
                     .1;
-                let layer_held = digital_active(&layer.hold, state);
+                let layer_hold = layer.hold.clone();
+                let layer_held = digital_active(&layer_hold, state);
                 let binding_count = layer.bindings.len();
 
                 for binding_index in 0..binding_count {
@@ -273,6 +275,19 @@ impl Mapper {
                         .enumerate()
                         .any(|(base_index, base)| {
                             self.mode_active[base_index] && bindings_match(base, binding)
+                        });
+                    let other_layer_latched = self.config.modes[&self.active_mode]
+                        .layers
+                        .values()
+                        .enumerate()
+                        .any(|(other_layer_index, other_layer)| {
+                            other_layer_index != layer_index
+                                && other_layer.bindings.iter().enumerate().any(
+                                    |(other_binding_index, other_binding)| {
+                                        self.layer_active[other_layer_index][other_binding_index]
+                                            && bindings_match(binding, other_binding)
+                                    },
+                                )
                         });
                     let earlier_layer_override = self.config.modes[&self.active_mode]
                         .layers
@@ -304,6 +319,14 @@ impl Mapper {
                                 true,
                             )
                         });
+                    let hold_globally_consumed = input_is_consumed(
+                        &layer_hold,
+                        binding,
+                        &self.config.global.bindings,
+                        &self.global_capture,
+                        state,
+                        true,
+                    );
                     let mode_consumed = binding
                         .input
                         .iter()
@@ -318,6 +341,14 @@ impl Mapper {
                                 true,
                             )
                         });
+                    let hold_mode_consumed = input_is_consumed(
+                        &layer_hold,
+                        binding,
+                        &self.config.modes[&self.active_mode].bindings,
+                        &self.mode_capture,
+                        state,
+                        true,
+                    );
                     let layer_consumed = binding
                         .input
                         .iter()
@@ -345,10 +376,14 @@ impl Mapper {
                             })
                         });
                     let suppressed = base_latched
-                        || earlier_layer_override
+                        || other_layer_latched
+                        || (earlier_layer_override && !was_active)
                         || globally_consumed
+                        || hold_globally_consumed
                         || mode_consumed
-                        || layer_consumed;
+                        || hold_mode_consumed
+                        || layer_consumed
+                        || (self.layer_capture[layer_index][binding_index] && !was_active);
                     let (active, pressed, released) = if !layer_held {
                         (false, false, was_active)
                     } else if suppressed {
@@ -653,7 +688,7 @@ impl Mapper {
     }
 
     fn release_outputs(&mut self, outputs: &mut Vec<Output>) {
-        for (held, _) in self.held.drain(..) {
+        for (held, _) in self.held.drain(..).rev() {
             match held {
                 HeldOutput::Key(key) => outputs.push(Output::Key {
                     key,
@@ -1468,12 +1503,20 @@ mod tests {
                 pressed: false,
             }]
         );
-        assert_eq!(mapper.process(&state_with(&[ProtocolButton::B])), []);
-        assert_eq!(mapper.process(&ControllerState::default()), []);
         assert_eq!(
-            mapper.process(&state_with(&[ProtocolButton::B])),
+            mapper.process(&state_with(&[ProtocolButton::Lb, ProtocolButton::B])),
+            []
+        );
+        assert_eq!(mapper.process(&state_with(&[ProtocolButton::B])), []);
+        assert_eq!(
+            mapper.process(&state_with(&[ProtocolButton::Lb, ProtocolButton::B])),
+            []
+        );
+        assert_eq!(mapper.process(&state_with(&[ProtocolButton::Lb])), []);
+        assert_eq!(
+            mapper.process(&state_with(&[ProtocolButton::Lb, ProtocolButton::B])),
             [Output::Key {
-                key: KeyCode::KEY_ESC,
+                key: KeyCode::KEY_Q,
                 pressed: true,
             }]
         );
@@ -1532,6 +1575,43 @@ mod tests {
     }
 
     #[test]
+    fn consuming_chord_can_reserve_a_layer_hold() {
+        for scope in ["global", "modes.desktop"] {
+            let config = Config::parse(&format!(
+                r#"
+                    version = 1
+                    default_mode = "desktop"
+
+                    [[{scope}.bindings]]
+                    chord = ["steam", "left-bumper"]
+                    consume = true
+                    action = {{ type = "event", name = "hold.chord" }}
+
+                    [modes.desktop.layers.apps]
+                    hold = "left-bumper"
+                    [[modes.desktop.layers.apps.bindings]]
+                    input = "b"
+                    action = {{ type = "key", key = "q" }}
+                "#,
+            ))
+            .unwrap();
+            let mut mapper = Mapper::new(config).unwrap();
+
+            assert_eq!(mapper.process(&state_with(&[ProtocolButton::Steam])), []);
+            assert_eq!(
+                mapper.process(&state_with(&[
+                    ProtocolButton::Steam,
+                    ProtocolButton::Lb,
+                    ProtocolButton::B,
+                ])),
+                [Output::Event {
+                    name: "hold.chord".to_owned(),
+                }]
+            );
+        }
+    }
+
+    #[test]
     fn simultaneous_layers_use_declaration_order_without_fallthrough() {
         let config = Config::parse(
             r#"
@@ -1584,6 +1664,82 @@ mod tests {
                 key: KeyCode::KEY_O,
                 pressed: true,
             }]
+        );
+        assert_eq!(
+            mapper.process(&state_with(&[
+                ProtocolButton::Lb,
+                ProtocolButton::Rb,
+                ProtocolButton::B,
+            ])),
+            []
+        );
+        assert_eq!(
+            mapper.process(&state_with(&[ProtocolButton::Lb, ProtocolButton::Rb])),
+            [Output::Key {
+                key: KeyCode::KEY_O,
+                pressed: false,
+            }]
+        );
+        assert_eq!(
+            mapper.process(&state_with(&[
+                ProtocolButton::Lb,
+                ProtocolButton::Rb,
+                ProtocolButton::B,
+            ])),
+            [Output::Key {
+                key: KeyCode::KEY_Q,
+                pressed: true,
+            }]
+        );
+    }
+
+    #[test]
+    fn release_all_uses_reverse_press_order() {
+        let config = Config::parse(
+            r#"
+                version = 1
+                default_mode = "desktop"
+
+                [modes.desktop]
+                [[modes.desktop.bindings]]
+                input = "l4"
+                action = { type = "key", key = "super" }
+
+                [modes.desktop.layers.apps]
+                hold = "left-bumper"
+                [[modes.desktop.layers.apps.bindings]]
+                input = "b"
+                action = { type = "key", key = "q" }
+            "#,
+        )
+        .unwrap();
+        let mut mapper = Mapper::new(config).unwrap();
+        let pressed = state_with(&[ProtocolButton::L4, ProtocolButton::Lb, ProtocolButton::B]);
+        assert_eq!(
+            mapper.process(&pressed),
+            [
+                Output::Key {
+                    key: KeyCode::KEY_LEFTMETA,
+                    pressed: true,
+                },
+                Output::Key {
+                    key: KeyCode::KEY_Q,
+                    pressed: true,
+                },
+            ]
+        );
+        assert_eq!(
+            mapper.release_all(),
+            [
+                Output::Key {
+                    key: KeyCode::KEY_Q,
+                    pressed: false,
+                },
+                Output::Key {
+                    key: KeyCode::KEY_LEFTMETA,
+                    pressed: false,
+                },
+            ]
         );
     }
 
