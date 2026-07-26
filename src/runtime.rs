@@ -110,6 +110,28 @@ impl Daemon {
                             message: error.to_string(),
                         },
                     },
+                    Request::OskHide { session } => {
+                        if session == 0 || session != keyboard.session() || !keyboard.visible {
+                            Response::Error {
+                                message: "keyboard session is no longer active".into(),
+                            }
+                        } else {
+                            mapper.suspend(&mut mapped);
+                            Self::emit(
+                                &mut mapped,
+                                &mut mapper,
+                                &mut outputs,
+                                &events,
+                                &device,
+                                &mut keyboard,
+                                &osk,
+                            )?;
+                            keyboard.set_visible(false);
+                            keyboard_closed_at = None;
+                            osk.send_replace(keyboard);
+                            Response::Done
+                        }
+                    }
                     Request::Key {
                         code,
                         shift,
@@ -161,6 +183,7 @@ impl Daemon {
                             _ => {}
                         }
                         if keyboard.visible {
+                            keyboard.shift_held = mapper.keyboard_shifted();
                             for (side, source) in [
                                 (OskPadSide::Left, state.left_pad),
                                 (OskPadSide::Right, state.right_pad),
@@ -246,9 +269,7 @@ impl Daemon {
             .any(|output| matches!(output, Output::KeyboardToggle))
         {
             mapped.retain(|output| !matches!(output, Output::KeyboardToggle));
-            if !keyboard.visible {
-                mapper.suspend(mapped);
-            }
+            mapper.suspend(mapped);
             keyboard.set_visible(!keyboard.visible);
             osk.send_replace(*keyboard);
         }

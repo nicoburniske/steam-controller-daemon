@@ -101,6 +101,10 @@ impl Buttons {
         self.0 |= button.mask();
     }
 
+    pub fn remove(&mut self, button: Button) {
+        self.0 &= !button.mask();
+    }
+
     pub fn remove_inactive(&mut self, active: Self) {
         self.0 &= active.0;
     }

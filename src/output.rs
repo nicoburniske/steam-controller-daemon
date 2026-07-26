@@ -12,6 +12,8 @@ use crate::{Error, Result, ResultExt};
 pub struct Outputs {
     gamepad: VirtualDevice,
     keyboard: VirtualDevice,
+    left_shift_held: bool,
+    right_shift_held: bool,
     mouse: VirtualDevice,
     mouse_remainder: (f32, f32),
     scroll_remainder: (f32, f32),
@@ -128,6 +130,8 @@ impl Outputs {
         Ok(Self {
             gamepad,
             keyboard,
+            left_shift_held: false,
+            right_shift_held: false,
             mouse,
             mouse_remainder: (0.0, 0.0),
             scroll_remainder: (0.0, 0.0),
@@ -137,14 +141,21 @@ impl Outputs {
 
     pub fn emit(&mut self, command: &Output) -> Result<()> {
         match command {
-            Output::Key { key, pressed } => self
-                .keyboard
-                .emit(&[InputEvent::new(
-                    EventType::KEY.0,
-                    key.code(),
-                    i32::from(*pressed),
-                )])
-                .whence(),
+            Output::Key { key, pressed } => {
+                self.keyboard
+                    .emit(&[InputEvent::new(
+                        EventType::KEY.0,
+                        key.code(),
+                        i32::from(*pressed),
+                    )])
+                    .whence()?;
+                if *key == KeyCode::KEY_LEFTSHIFT {
+                    self.left_shift_held = *pressed;
+                } else if *key == KeyCode::KEY_RIGHTSHIFT {
+                    self.right_shift_held = *pressed;
+                }
+                Ok(())
+            }
             Output::MouseButton { button, pressed } => {
                 let code = match button {
                     MouseButton::Left => KeyCode::BTN_LEFT,
@@ -256,7 +267,7 @@ impl Outputs {
     }
 
     pub fn key(&mut self, key: KeyCode, shift: bool) -> Result<()> {
-        if shift {
+        if shift && !self.left_shift_held && !self.right_shift_held {
             self.keyboard
                 .emit(&[
                     InputEvent::new(EventType::KEY.0, KeyCode::KEY_LEFTSHIFT.code(), 1),

@@ -26,6 +26,8 @@ pub struct NamedEvent {
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
 pub struct OskState {
     pub visible: bool,
+    #[serde(default)]
+    pub shift_held: bool,
     pub left: OskPad,
     pub right: OskPad,
     session: u64,
@@ -46,6 +48,8 @@ pub struct OskClick {
     pub sequence: u64,
     pub pad: OskPadSide,
     pub position: [f32; 2],
+    #[serde(default)]
+    pub shift_held: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -104,6 +108,9 @@ pub enum Request {
     Reload,
     Events,
     Osk,
+    OskHide {
+        session: u64,
+    },
     Key {
         code: u16,
         shift: bool,
@@ -131,6 +138,7 @@ impl OskState {
             self.click_history_len = 0;
         }
         self.visible = visible;
+        self.shift_held = false;
         self.left.touched = false;
         self.left.pressed = false;
         self.right.touched = false;
@@ -173,6 +181,7 @@ impl OskState {
             sequence,
             pad,
             position,
+            shift_held: self.shift_held,
         };
         self.click_sequence = sequence.wrapping_add(1);
         self.click_history_len = self
@@ -333,6 +342,13 @@ impl Client {
             shift,
             session,
         })? {
+            Response::Done => Ok(()),
+            _ => Err(Error::message("unexpected daemon response")),
+        }
+    }
+
+    pub fn hide_osk(&self, session: u64) -> Result<()> {
+        match self.request(Request::OskHide { session })? {
             Response::Done => Ok(()),
             _ => Err(Error::message("unexpected daemon response")),
         }

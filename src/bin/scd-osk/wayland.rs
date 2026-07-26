@@ -1,5 +1,5 @@
 use crate::{
-    keyboard::{KeyStroke, Keyboard},
+    keyboard::{Keyboard, KeyboardOutput},
     render::KeyboardRenderer,
 };
 use scd::{Client, OskState, Result, ResultExt};
@@ -84,14 +84,22 @@ pub fn run(socket: PathBuf, font: Box<[u8]>) -> Result<()> {
         })
         .whence()?;
 
-    let (key_output, keys) = mpsc::channel::<KeyStroke>();
+    let (key_output, keys) = mpsc::channel::<KeyboardOutput>();
     thread::Builder::new()
         .name("scd-osk-output".into())
         .spawn(move || {
             let client = Client::new(socket);
-            for key in keys {
-                if let Err(error) = client.key(key.code, key.shift, key.session) {
-                    log::warn!("could not type keyboard key: {error}");
+            for output in keys {
+                let result = match output {
+                    KeyboardOutput::Key {
+                        code,
+                        shift,
+                        session,
+                    } => client.key(code, shift, session),
+                    KeyboardOutput::Hide { session } => client.hide_osk(session),
+                };
+                if let Err(error) = result {
+                    log::warn!("keyboard output failed: {error}");
                 }
             }
         })
@@ -144,7 +152,7 @@ struct State {
     buffer: Option<Buffer>,
     renderer: KeyboardRenderer,
     keyboard: Keyboard,
-    key_output: mpsc::Sender<KeyStroke>,
+    key_output: mpsc::Sender<KeyboardOutput>,
     width: u32,
     height: u32,
     scale: u32,

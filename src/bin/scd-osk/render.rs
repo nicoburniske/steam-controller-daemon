@@ -1,4 +1,4 @@
-use crate::keyboard::{Half, Keyboard};
+use crate::keyboard::{ControllerHint, Half, Keyboard};
 use blit::{
     RepaintBuffer, Runtime,
     color::Color,
@@ -130,7 +130,7 @@ impl KeyboardRenderer {
             keyboard.for_each_key(
                 grid.width,
                 grid.height,
-                |slot, primary, secondary, [x, y, width, height], active, special| {
+                |slot, primary, secondary, hint, [x, y, width, height], active, special| {
                     let cell = LogicalRect {
                         x: grid.x + x,
                         y: grid.y + y,
@@ -208,6 +208,47 @@ impl KeyboardRenderer {
                                     y: key.y + 1.0,
                                     width: key.width,
                                     height: key.height * 0.42,
+                                },
+                            );
+                    }
+                    if let Some(hint) = hint {
+                        let (hint, face_button) = match hint {
+                            ControllerHint::X => ("X", true),
+                            ControllerHint::Y => ("Y", true),
+                            ControllerHint::LeftTrigger => ("LT", false),
+                            ControllerHint::RightTrigger => ("RT", false),
+                        };
+                        let hint_width = if face_button { 24.0 } else { 36.0 };
+                        let hint_height = 24.0;
+                        Button::new(hint)
+                            .id((slot, "hint"))
+                            .background(if face_button {
+                                Color::from_rgba8(26, 159, 255, 255)
+                            } else {
+                                Color::from_rgba8(222, 226, 232, 255)
+                            })
+                            .text_color(if face_button {
+                                Color::WHITE
+                            } else {
+                                Color::from_rgba8(14, 20, 27, 255)
+                            })
+                            .uniform_radius(if face_button { 12.0 } else { 4.0 })
+                            .padding_x(0.0)
+                            .padding_y(0.0)
+                            .text_size(11.0)
+                            .text_weight(600)
+                            .text_options(TextOptions {
+                                horizontal_align: HorizontalAlign::Center,
+                                vertical_align: VerticalAlign::Center,
+                                ..Default::default()
+                            })
+                            .render(
+                                ui,
+                                LogicalRect {
+                                    x: key.x + 6.0,
+                                    y: key.y + (key.height - hint_height) * 0.5,
+                                    width: hint_width,
+                                    height: hint_height,
                                 },
                             );
                     }

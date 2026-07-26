@@ -3,16 +3,29 @@ use scd::{OskPadSide, OskState};
 use std::sync::mpsc::Sender;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct KeyStroke {
-    pub code: u16,
-    pub shift: bool,
-    pub session: u64,
+pub enum KeyboardOutput {
+    Key {
+        code: u16,
+        shift: bool,
+        session: u64,
+    },
+    Hide {
+        session: u64,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Half {
     Left,
     Right,
+}
+
+#[derive(Clone, Copy)]
+pub enum ControllerHint {
+    X,
+    Y,
+    LeftTrigger,
+    RightTrigger,
 }
 
 impl Half {
@@ -38,6 +51,7 @@ pub struct Slot {
 pub struct Keyboard {
     page: Page,
     shifted: bool,
+    shift_held: bool,
     pointers: [Option<[f32; 2]>; 2],
     pressed: [bool; 2],
     click_cursor: u64,
@@ -56,6 +70,7 @@ enum Page {
 struct Key {
     label: &'static str,
     shifted_label: Option<&'static str>,
+    hint: Option<ControllerHint>,
     action: Action,
     weight: u8,
 }
@@ -65,6 +80,7 @@ enum Action {
     Key { code: KeyCode, shift: Shift },
     Shift,
     Page(Page),
+    Close,
 }
 
 #[derive(Clone, Copy)]
@@ -79,6 +95,7 @@ macro_rules! character {
         Key {
             label: $label,
             shifted_label: Some($shifted),
+            hint: None,
             action: Action::Key {
                 code: KeyCode::$code,
                 shift: Shift::Latch,
@@ -93,6 +110,7 @@ macro_rules! key {
         Key {
             label: $label,
             shifted_label: None,
+            hint: None,
             action: Action::Key {
                 code: KeyCode::$code,
                 shift: Shift::Never,
@@ -104,6 +122,7 @@ macro_rules! key {
         Key {
             label: $label,
             shifted_label: None,
+            hint: None,
             action: Action::Key {
                 code: KeyCode::$code,
                 shift: Shift::Always,
@@ -115,6 +134,22 @@ macro_rules! key {
         Key {
             label: $label,
             shifted_label: None,
+            hint: None,
+            action: Action::Key {
+                code: KeyCode::$code,
+                shift: Shift::Never,
+            },
+            weight: $weight,
+        }
+    };
+}
+
+macro_rules! hinted_key {
+    ($label:literal, $hint:expr, $code:ident, $weight:literal) => {
+        Key {
+            label: $label,
+            shifted_label: None,
+            hint: Some($hint),
             action: Action::Key {
                 code: KeyCode::$code,
                 shift: Shift::Never,
@@ -127,6 +162,7 @@ macro_rules! key {
 const SHIFT: Key = Key {
     label: "Shift",
     shifted_label: None,
+    hint: Some(ControllerHint::LeftTrigger),
     action: Action::Shift,
     weight: 20,
 };
@@ -134,19 +170,28 @@ const CAPS: Key = key!("Caps", KEY_CAPSLOCK, 16);
 const SYMBOLS: Key = Key {
     label: "?123",
     shifted_label: None,
+    hint: None,
     action: Action::Page(Page::Symbols),
     weight: 14,
 };
 const ALPHABET: Key = Key {
     label: "ABC",
     shifted_label: None,
+    hint: None,
     action: Action::Page(Page::Letters),
     weight: 14,
 };
 const TAB: Key = key!("Tab", KEY_TAB, 14);
-const SPACE: Key = key!("Space", KEY_SPACE, 60);
-const BACKSPACE: Key = key!("Backspace", KEY_BACKSPACE, 14);
-const ENTER: Key = key!("Enter", KEY_ENTER, 17);
+const SPACE: Key = hinted_key!("Space", ControllerHint::Y, KEY_SPACE, 60);
+const BACKSPACE: Key = hinted_key!("Backspace", ControllerHint::X, KEY_BACKSPACE, 14);
+const ENTER: Key = hinted_key!("Enter", ControllerHint::RightTrigger, KEY_ENTER, 17);
+const CLOSE: Key = Key {
+    label: "Close",
+    shifted_label: None,
+    hint: None,
+    action: Action::Close,
+    weight: 14,
+};
 
 const LETTERS_PAGE: [&[Key]; 5] = [
     &[
@@ -210,7 +255,7 @@ const LETTERS_PAGE: [&[Key]; 5] = [
         character!("/", "?", KEY_SLASH),
         SHIFT,
     ],
-    &[SYMBOLS, TAB, SPACE, BACKSPACE, ENTER, SYMBOLS],
+    &[SYMBOLS, SPACE, CLOSE],
 ];
 
 const SYMBOLS_PAGE: [&[Key]; 5] = [
@@ -264,12 +309,18 @@ const SYMBOLS_PAGE: [&[Key]; 5] = [
         key!("\\", KEY_BACKSLASH),
         key!("|", KEY_BACKSLASH, shift),
     ],
-    &[ALPHABET, TAB, SPACE, BACKSPACE, ENTER, ALPHABET],
+    &[ALPHABET, SPACE, CLOSE],
 ];
 
 impl Keyboard {
-    pub fn update(&mut self, state: OskState, output: &Sender<KeyStroke>) -> bool {
-        let before = (self.page, self.shifted, self.pointers, self.pressed);
+    pub fn update(&mut self, state: OskState, output: &Sender<KeyboardOutput>) -> bool {
+        let before = (
+            self.page,
+            self.shifted,
+            self.shift_held,
+            self.pointers,
+            self.pressed,
+        );
         let accept_clicks = self.initialized && (state.visible || self.visible);
         if !self.initialized {
             self.initialized = true;
@@ -292,10 +343,10 @@ impl Keyboard {
                     let shift = match shift {
                         Shift::Never => false,
                         Shift::Always => true,
-                        Shift::Latch => self.shifted,
+                        Shift::Latch => self.shifted || click.shift_held,
                     };
                     if output
-                        .send(KeyStroke {
+                        .send(KeyboardOutput::Key {
                             code: code.code(),
                             shift,
                             session: state.session(),
@@ -319,6 +370,17 @@ impl Keyboard {
                     self.page = page;
                     self.shifted = false;
                 }
+                Action::Close => {
+                    if output
+                        .send(KeyboardOutput::Hide {
+                            session: state.session(),
+                        })
+                        .is_err()
+                    {
+                        log::error!("keyboard output worker stopped");
+                    }
+                    break;
+                }
             }
         }
         self.click_cursor = state.click_cursor();
@@ -336,14 +398,24 @@ impl Keyboard {
         } else {
             [false, false]
         };
+        self.shift_held = state.visible && state.shift_held;
         self.visible = state.visible;
-        before != (self.page, self.shifted, self.pointers, self.pressed)
+        before
+            != (
+                self.page,
+                self.shifted,
+                self.shift_held,
+                self.pointers,
+                self.pressed,
+            )
     }
 
     pub fn disconnect(&mut self) -> bool {
-        let changed = self.pointers != [None, None] || self.pressed != [false, false];
+        let changed =
+            self.shift_held || self.pointers != [None, None] || self.pressed != [false, false];
         self.initialized = false;
         self.visible = false;
+        self.shift_held = false;
         self.pointers = [None, None];
         self.pressed = [false, false];
         changed
@@ -353,9 +425,18 @@ impl Keyboard {
         &self,
         width: f32,
         height: f32,
-        mut visit: impl FnMut(Slot, &'static str, Option<&'static str>, [f32; 4], bool, bool),
+        mut visit: impl FnMut(
+            Slot,
+            &'static str,
+            Option<&'static str>,
+            Option<ControllerHint>,
+            [f32; 4],
+            bool,
+            bool,
+        ),
     ) {
         let rows = rows(self.page);
+        let shifted = self.shifted || self.shift_held;
         let row_height = height / rows.len() as f32;
         for (row_index, row) in rows.iter().enumerate() {
             let total_weight = row.iter().map(|key| u32::from(key.weight)).sum::<u32>();
@@ -365,13 +446,13 @@ impl Keyboard {
                 let shifted_label = key.shifted_label.filter(|_| {
                     key.label.len() != 1 || !key.label.as_bytes()[0].is_ascii_alphabetic()
                 });
-                let (label, secondary_label) = match (self.shifted, key.shifted_label) {
+                let (label, secondary_label) = match (shifted, key.shifted_label) {
                     (true, Some(shifted)) => (shifted, shifted_label.map(|_| key.label)),
                     _ => (key.label, shifted_label),
                 };
-                let active = matches!(key.action, Action::Shift) && self.shifted;
-                let special =
-                    matches!(key.action, Action::Shift | Action::Page(_)) || key.label.len() > 2;
+                let active = matches!(key.action, Action::Shift) && shifted;
+                let special = matches!(key.action, Action::Shift | Action::Page(_) | Action::Close)
+                    || key.label.len() > 2;
                 visit(
                     Slot {
                         row: row_index as u8,
@@ -379,6 +460,7 @@ impl Keyboard {
                     },
                     label,
                     secondary_label,
+                    key.hint,
                     [x, row_index as f32 * row_height, key_width, row_height],
                     active,
                     special,
@@ -450,7 +532,7 @@ mod tests {
         for expected in [KeyCode::KEY_Q, KeyCode::KEY_Y, KeyCode::KEY_W] {
             assert_eq!(
                 receiver.try_recv(),
-                Ok(KeyStroke {
+                Ok(KeyboardOutput::Key {
                     code: expected.code(),
                     shift: false,
                     session: 1,
@@ -490,13 +572,42 @@ mod tests {
         ] {
             assert_eq!(
                 receiver.try_recv(),
-                Ok(KeyStroke {
+                Ok(KeyboardOutput::Key {
                     code: code.code(),
                     shift,
                     session: 1,
                 })
             );
         }
+        assert_eq!(
+            receiver.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        );
+    }
+
+    #[test]
+    fn held_shift_applies_to_clicks_and_close_hides_the_session() {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let mut keyboard = Keyboard::default();
+        let mut state = OskState::default();
+        state.set_visible(true);
+        keyboard.update(state, &sender);
+
+        state.shift_held = true;
+        state.record_click(OskPadSide::Left, [-0.5, -0.5]);
+        state.shift_held = false;
+        state.record_click(OskPadSide::Right, [1.0, 0.9]);
+        keyboard.update(state, &sender);
+
+        assert_eq!(
+            receiver.try_recv(),
+            Ok(KeyboardOutput::Key {
+                code: KeyCode::KEY_Q.code(),
+                shift: true,
+                session: 1,
+            })
+        );
+        assert_eq!(receiver.try_recv(), Ok(KeyboardOutput::Hide { session: 1 }));
         assert_eq!(
             receiver.try_recv(),
             Err(std::sync::mpsc::TryRecvError::Empty)

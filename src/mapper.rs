@@ -15,6 +15,16 @@ const TRACKPAD_HAPTIC_MAX_TRAVEL: f32 = 4000.0 / 32767.0;
 const TRACKPAD_HAPTIC_TICK_TRAVEL: f32 = 3200.0 / 32767.0;
 const TRACKPAD_HAPTIC_MIN_INTERVAL_US: u32 = 25_000;
 const TRACKPAD_SCROLL_MIN_RADIUS: f32 = 1.0 / 3.0;
+const OSK_BINDINGS: [(Button, KeyCode); 8] = [
+    (Button::LeftTriggerClick, KeyCode::KEY_LEFTSHIFT),
+    (Button::X, KeyCode::KEY_BACKSPACE),
+    (Button::Y, KeyCode::KEY_SPACE),
+    (Button::RightTriggerClick, KeyCode::KEY_ENTER),
+    (Button::DpadUp, KeyCode::KEY_UP),
+    (Button::DpadDown, KeyCode::KEY_DOWN),
+    (Button::DpadLeft, KeyCode::KEY_LEFT),
+    (Button::DpadRight, KeyCode::KEY_RIGHT),
+];
 const GAMEPAD_AXES: [GamepadAxis; 6] = [
     GamepadAxis::LeftX,
     GamepadAxis::LeftY,
@@ -30,6 +40,7 @@ pub struct Mapper {
     global: Vec<GlobalState>,
     routes: Vec<ActiveRoute>,
     quarantined: Buttons,
+    osk_active: Buttons,
     held: IndexMap<HeldOutput, usize>,
     gamepad_axes: [f32; 6],
     left_pad_haptic: TrackpadHapticState,
@@ -99,6 +110,7 @@ impl Mapper {
             global,
             routes: Vec::new(),
             quarantined: Buttons::default(),
+            osk_active: Buttons::default(),
             held: IndexMap::new(),
             gamepad_axes: [0.0; 6],
             left_pad_haptic: TrackpadHapticState::default(),
@@ -168,6 +180,24 @@ impl Mapper {
                 if mode_changed {
                     break;
                 }
+            }
+        }
+
+        if !mode_changed {
+            for (input, key) in OSK_BINDINGS {
+                let was_active = self.osk_active.contains(input);
+                let active = keyboard_visible
+                    && button_active(input, state)
+                    && !self.global_reserves(input, state);
+                if active == was_active {
+                    continue;
+                }
+                if active {
+                    self.osk_active.insert(input);
+                } else {
+                    self.osk_active.remove(input);
+                }
+                self.set_held(HeldOutput::Key(key), active, outputs);
             }
         }
 
@@ -399,6 +429,10 @@ impl Mapper {
         self.release_outputs(outputs);
     }
 
+    pub fn keyboard_shifted(&self) -> bool {
+        self.osk_active.contains(Button::LeftTriggerClick)
+    }
+
     fn mode(&self) -> &crate::config::Mode {
         self.config
             .modes
@@ -510,6 +544,7 @@ impl Mapper {
     fn release_outputs(&mut self, outputs: &mut Vec<Output>) {
         self.routes.clear();
         self.quarantined = Buttons::default();
+        self.osk_active = Buttons::default();
         for (held, _) in self.held.drain(..).rev() {
             outputs.push(held.output(false));
         }
@@ -943,10 +978,62 @@ mod tests {
         assert_eq!(
             keyboard_mapped(
                 &mut mapper,
-                &state_with(&[ProtocolButton::Steam, ProtocolButton::X])
+                &state_with(&[ProtocolButton::Steam, ProtocolButton::X, ProtocolButton::Y,])
             ),
             [Output::KeyboardToggle]
         );
+    }
+
+    #[test]
+    fn keyboard_controls_are_held_repeated_and_released_together() {
+        let config = Config::parse(
+            r#"
+                version = 1
+                default_mode = "desktop"
+                [modes.desktop]
+            "#,
+        )
+        .unwrap();
+        let mut mapper = Mapper::new(config);
+        let held = state_with(&[
+            ProtocolButton::LeftTriggerClick,
+            ProtocolButton::X,
+            ProtocolButton::Y,
+            ProtocolButton::RightTriggerClick,
+            ProtocolButton::DpadUp,
+            ProtocolButton::DpadDown,
+            ProtocolButton::DpadLeft,
+            ProtocolButton::DpadRight,
+        ]);
+        let mut expected = [
+            KeyCode::KEY_LEFTSHIFT,
+            KeyCode::KEY_BACKSPACE,
+            KeyCode::KEY_SPACE,
+            KeyCode::KEY_ENTER,
+            KeyCode::KEY_UP,
+            KeyCode::KEY_DOWN,
+            KeyCode::KEY_LEFT,
+            KeyCode::KEY_RIGHT,
+        ];
+
+        assert_eq!(
+            keyboard_mapped(&mut mapper, &held),
+            expected.map(|key| Output::Key { key, pressed: true })
+        );
+        assert!(mapper.keyboard_shifted());
+        assert_eq!(keyboard_mapped(&mut mapper, &held), []);
+
+        let mut outputs = Vec::new();
+        mapper.suspend(&mut outputs);
+        expected.reverse();
+        assert_eq!(
+            outputs,
+            expected.map(|key| Output::Key {
+                key,
+                pressed: false,
+            })
+        );
+        assert!(!mapper.keyboard_shifted());
     }
 
     #[test]
