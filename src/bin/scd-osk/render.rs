@@ -167,11 +167,7 @@ impl KeyboardRenderer {
                             })
                     });
                     let text_options = TextOptions {
-                        horizontal_align: if hint.is_some() && special && primary != "Space" {
-                            HorizontalAlign::Right
-                        } else {
-                            HorizontalAlign::Center
-                        },
+                        horizontal_align: HorizontalAlign::Center,
                         vertical_align: if secondary.is_some() {
                             VerticalAlign::Bottom
                         } else {
@@ -182,7 +178,11 @@ impl KeyboardRenderer {
                     Button::new(primary)
                         .id(slot)
                         .background(background)
-                        .text_color(text)
+                        .text_color(if hint.is_some() {
+                            Color::TRANSPARENT
+                        } else {
+                            text
+                        })
                         .uniform_radius(1.0)
                         .padding_x(2.0)
                         .padding_y(if secondary.is_some() { 7.0 } else { 2.0 })
@@ -218,17 +218,45 @@ impl KeyboardRenderer {
                             );
                     }
                     if let Some((input, hint)) = hint {
+                        let gap = 6.0;
+                        let hint_width = hint.width();
+                        let label_width = (primary.len() as f32 * if special { 9.5 } else { 12.0 })
+                            .max(18.0)
+                            .min((key.width - hint_width - gap - 12.0).max(0.0));
+                        let group_x = key.x + (key.width - hint_width - gap - label_width) * 0.5;
                         render_hint(
                             ui,
                             hint,
                             (slot, input),
                             LogicalRect {
-                                x: key.x + 6.0,
+                                x: group_x,
                                 y: key.y + (key.height - 24.0) * 0.5,
-                                width: hint.width(),
+                                width: hint_width,
                                 height: 24.0,
                             },
                         );
+                        Button::new(primary)
+                            .id((slot, "hint-label"))
+                            .background(Color::TRANSPARENT)
+                            .text_color(text)
+                            .padding_x(0.0)
+                            .padding_y(0.0)
+                            .text_size(if special { 17.0 } else { 22.0 })
+                            .text_weight(600)
+                            .text_options(TextOptions {
+                                horizontal_align: HorizontalAlign::Center,
+                                vertical_align: VerticalAlign::Center,
+                                ..Default::default()
+                            })
+                            .render(
+                                ui,
+                                LogicalRect {
+                                    x: group_x + hint_width + gap,
+                                    y: key.y,
+                                    width: label_width,
+                                    height: key.height,
+                                },
+                            );
                     }
                 },
             );
