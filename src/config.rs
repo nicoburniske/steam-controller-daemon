@@ -175,6 +175,36 @@ impl Config {
                         "invalid configuration: mode {name:?} axis mapping {index} components is only valid for a gyro source"
                     )));
                 }
+                if let Some(activation) = &mapping.activation {
+                    match activation {
+                        AxisActivation::Trigger(activation) => {
+                            if !matches!(
+                                activation.source,
+                                AnalogSource::LeftTrigger | AnalogSource::RightTrigger
+                            ) {
+                                return Err(Error::message(format!(
+                                    "invalid configuration: mode {name:?} axis mapping {index} activation source must be a trigger"
+                                )));
+                            }
+                            if !activation.engage.is_finite()
+                                || !activation.release.is_finite()
+                                || activation.release < 0.0
+                                || activation.release >= activation.engage
+                                || activation.engage > 1.0
+                            {
+                                return Err(Error::message(format!(
+                                    "invalid configuration: mode {name:?} axis mapping {index} activation thresholds must satisfy 0 <= release < engage <= 1"
+                                )));
+                            }
+                        }
+                        AxisActivation::All { all } if all.is_empty() => {
+                            return Err(Error::message(format!(
+                                "invalid configuration: mode {name:?} axis mapping {index} activation must contain at least one button"
+                            )));
+                        }
+                        AxisActivation::All { .. } => {}
+                    }
+                }
                 if let Some(deadzone) = mapping.deadzone
                     && (!deadzone.is_finite() || !(0.0..1.0).contains(&deadzone))
                 {
@@ -215,6 +245,10 @@ impl Config {
                 if mode.axes[..index]
                     .iter()
                     .any(|earlier| earlier.target == mapping.target)
+                    && !matches!(
+                        mapping.target,
+                        AnalogTarget::GamepadLeftStick | AnalogTarget::GamepadRightStick
+                    )
                 {
                     return Err(Error::message(format!(
                         "invalid configuration: mode {name:?} axis mapping {index} duplicates target {:?}",
@@ -403,11 +437,13 @@ pub const fn is_keyboard_key(key: KeyCode) -> bool {
         && !(code >= 0x2c0 && code <= 0x2ff)
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct AxisMapping {
     pub source: AnalogSource,
     pub target: AnalogTarget,
+    #[serde(default)]
+    pub activation: Option<AxisActivation>,
     #[serde(default)]
     pub deadzone: Option<f32>,
     #[serde(default)]
@@ -426,6 +462,21 @@ pub struct AxisMapping {
     pub swap_xy: bool,
     #[serde(default)]
     pub components: Option<[AxisComponent; 2]>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(untagged)]
+pub enum AxisActivation {
+    Trigger(TriggerActivation),
+    All { all: Vec<Button> },
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct TriggerActivation {
+    pub source: AnalogSource,
+    pub engage: f32,
+    pub release: f32,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
@@ -643,6 +694,12 @@ mod tests {
                 r#"source = "right-trigger"
                    target = "mouse-motion""#,
                 "scalar source",
+            ),
+            (
+                r#"source = "gyro"
+                   target = "gamepad-right-stick"
+                   activation = { source = "left-trigger", engage = 0.1, release = 0.2 }"#,
+                "activation thresholds",
             ),
         ] {
             let source = format!(

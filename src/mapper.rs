@@ -4,8 +4,8 @@ use indexmap::IndexMap;
 use crate::{
     Error, Result,
     config::{
-        Action, AnalogSource, AnalogTarget, AxisComponent, AxisMapping, Config, Curve,
-        GamepadButton, MouseButton,
+        Action, AnalogSource, AnalogTarget, AxisActivation, AxisComponent, AxisMapping, Config,
+        Curve, GamepadButton, MouseButton,
     },
     protocol::{Button, Buttons, ControllerState, StateFormat, TouchpadState, Trackpad},
 };
@@ -33,6 +33,7 @@ pub struct Mapper {
     osk_active: Buttons,
     held: IndexMap<HeldOutput, usize>,
     gamepad_axes: [f32; 6],
+    axis_active: Vec<bool>,
     trackpad_haptics: [TrackpadHapticState; 2],
     previous: Option<ControllerState>,
 }
@@ -93,6 +94,7 @@ impl Mapper {
             .get_index_of(&config.default_mode)
             .expect("parsed configuration has a valid default mode");
         let global = vec![GlobalState::default(); config.global.bindings.len()];
+        let axis_active = vec![false; config.modes[active_mode].axes.len()];
         Self {
             config,
             active_mode,
@@ -102,6 +104,7 @@ impl Mapper {
             osk_active: Buttons::default(),
             held: IndexMap::new(),
             gamepad_axes: [0.0; 6],
+            axis_active,
             trackpad_haptics: Default::default(),
             previous: None,
         }
@@ -324,24 +327,59 @@ impl Mapper {
         }
 
         if !keyboard_visible && !interrupted {
+            let mut gamepad = [0.0; 6];
             let mapping_count = self.mode().axes.len();
             for index in 0..mapping_count {
-                let mapping = self.mode().axes[index];
-                let value = analog_value(&mapping, state, self.previous.as_ref());
-                match (mapping.target, value) {
+                let was_active = self.axis_active[index];
+                let (active, target, value) = {
+                    let mapping = &self.mode().axes[index];
+                    let active =
+                        mapping
+                            .activation
+                            .as_ref()
+                            .is_none_or(|activation| match activation {
+                                AxisActivation::Trigger(activation) => {
+                                    let value = match activation.source {
+                                        AnalogSource::LeftTrigger => state.triggers[0],
+                                        AnalogSource::RightTrigger => state.triggers[1],
+                                        _ => {
+                                            unreachable!(
+                                                "configuration validation requires a trigger"
+                                            )
+                                        }
+                                    };
+                                    if was_active {
+                                        value > activation.release
+                                    } else {
+                                        value >= activation.engage
+                                    }
+                                }
+                                AxisActivation::All { all } => {
+                                    all.iter().all(|button| state.buttons.contains(*button))
+                                }
+                            });
+                    (
+                        active,
+                        mapping.target,
+                        active.then(|| analog_value(mapping, state, self.previous.as_ref())),
+                    )
+                };
+                self.axis_active[index] = active;
+                let Some(value) = value else { continue };
+                match (target, value) {
                     (AnalogTarget::GamepadLeftStick, AnalogValue::Vector([x, y])) => {
-                        self.set_gamepad_axis(GamepadAxis::LeftX, x, outputs);
-                        self.set_gamepad_axis(GamepadAxis::LeftY, y, outputs);
+                        gamepad[GamepadAxis::LeftX as usize] += x;
+                        gamepad[GamepadAxis::LeftY as usize] += y;
                     }
                     (AnalogTarget::GamepadRightStick, AnalogValue::Vector([x, y])) => {
-                        self.set_gamepad_axis(GamepadAxis::RightX, x, outputs);
-                        self.set_gamepad_axis(GamepadAxis::RightY, y, outputs);
+                        gamepad[GamepadAxis::RightX as usize] += x;
+                        gamepad[GamepadAxis::RightY as usize] += y;
                     }
                     (AnalogTarget::GamepadLeftTrigger, AnalogValue::Scalar(value)) => {
-                        self.set_gamepad_axis(GamepadAxis::LeftTrigger, value, outputs);
+                        gamepad[GamepadAxis::LeftTrigger as usize] = value;
                     }
                     (AnalogTarget::GamepadRightTrigger, AnalogValue::Scalar(value)) => {
-                        self.set_gamepad_axis(GamepadAxis::RightTrigger, value, outputs);
+                        gamepad[GamepadAxis::RightTrigger as usize] = value;
                     }
                     (AnalogTarget::MouseMotion, AnalogValue::Vector([x, y])) => {
                         if x != 0.0 || y != 0.0 {
@@ -355,6 +393,16 @@ impl Mapper {
                     }
                     _ => unreachable!("configuration validation rejects mismatched analog shapes"),
                 }
+            }
+            for axis in GAMEPAD_AXES {
+                let value = gamepad[axis as usize];
+                let value = if matches!(axis, GamepadAxis::LeftTrigger | GamepadAxis::RightTrigger)
+                {
+                    value.clamp(0.0, 1.0)
+                } else {
+                    value.clamp(-1.0, 1.0)
+                };
+                self.set_gamepad_axis(axis, value, outputs);
             }
         }
 
@@ -413,6 +461,7 @@ impl Mapper {
         self.active_mode = active_mode;
         self.config = config;
         self.global = vec![GlobalState::default(); self.config.global.bindings.len()];
+        self.axis_active = vec![false; self.mode().axes.len()];
         self.trackpad_haptics = Default::default();
         outputs.push(Output::ModeChanged {
             name: self.active_mode().to_owned(),
@@ -523,6 +572,7 @@ impl Mapper {
         self.release_outputs(outputs);
         self.active_mode = index;
         self.global.fill(GlobalState::default());
+        self.axis_active = vec![false; self.mode().axes.len()];
         self.trackpad_haptics = Default::default();
         outputs.push(Output::ModeChanged {
             name: self.active_mode().to_owned(),
@@ -563,6 +613,7 @@ impl Mapper {
         self.routes.clear();
         self.quarantined = Buttons::default();
         self.osk_active = Buttons::default();
+        self.axis_active.fill(false);
         for (held, _) in self.held.drain(..).rev() {
             outputs.push(held.output(false));
         }
@@ -822,7 +873,7 @@ fn analog_value(
         AnalogSource::Gyro => {
             let components = mapping
                 .components
-                .unwrap_or([AxisComponent::Z, AxisComponent::X]);
+                .unwrap_or([AxisComponent::Y, AxisComponent::X]);
             components.map(|component| match component {
                 AxisComponent::X => current.gyro[0],
                 AxisComponent::Y => current.gyro[1],
@@ -1366,6 +1417,54 @@ mod tests {
     }
 
     #[test]
+    fn gyro_activation_is_hysteretic_and_adds_to_stick() {
+        let config = Config::parse(
+            r#"
+                version = 1
+                default_mode = "one"
+                [modes.one]
+                [[modes.one.axes]]
+                source = "right-stick"
+                target = "gamepad-right-stick"
+                [[modes.one.axes]]
+                source = "gyro"
+                target = "gamepad-right-stick"
+                activation = { source = "left-trigger", engage = 0.15, release = 0.10 }
+                components = ["z", "x"]
+                sensitivity = 0.5
+            "#,
+        )
+        .unwrap();
+        let mut mapper = Mapper::new(config);
+        let mut state = ControllerState {
+            right_stick: [0.25, 0.0],
+            gyro: [0.0, 0.0, 0.4],
+            ..ControllerState::default()
+        };
+        let right_x = |outputs: Vec<Output>| {
+            outputs.into_iter().find_map(|output| match output {
+                Output::GamepadAxis {
+                    axis: GamepadAxis::RightX,
+                    value,
+                } => Some(value),
+                _ => None,
+            })
+        };
+
+        state.triggers[0] = 0.14;
+        assert_eq!(right_x(mapped(&mut mapper, &state)), Some(0.25));
+
+        state.triggers[0] = 0.15;
+        assert!((right_x(mapped(&mut mapper, &state)).unwrap() - 0.45).abs() < 1e-6);
+
+        state.triggers[0] = 0.11;
+        assert_eq!(mapped(&mut mapper, &state), []);
+
+        state.triggers[0] = 0.10;
+        assert_eq!(right_x(mapped(&mut mapper, &state)), Some(0.25));
+    }
+
+    #[test]
     fn circular_scroll_keeps_direction_across_wrap_and_ignores_center() {
         let config = Config::parse(
             r#"
@@ -1493,7 +1592,7 @@ mod tests {
         .unwrap();
         let mut mapper = Mapper::new(config.clone());
         let mut state = ControllerState {
-            gyro: [0.0, 0.0, 1.0],
+            gyro: [0.0, 1.0, 0.0],
             imu_timestamp_us: u32::MAX - 4_999,
             ..ControllerState::default()
         };
