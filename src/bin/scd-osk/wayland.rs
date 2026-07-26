@@ -32,6 +32,7 @@ use smithay_client_toolkit::{
 };
 use std::{path::PathBuf, sync::mpsc, thread, time::Duration};
 
+const WIDTH: u32 = 1280;
 const HEIGHT: u32 = 360;
 
 pub fn run(socket: PathBuf, font: Box<[u8]>) -> Result<()> {
@@ -115,10 +116,10 @@ pub fn run(socket: PathBuf, font: Box<[u8]>) -> Result<()> {
         layer,
         pool,
         buffer: None,
-        renderer: KeyboardRenderer::new(font, 1, HEIGHT, 1)?,
+        renderer: KeyboardRenderer::new(font, WIDTH, HEIGHT, 1)?,
         keyboard: Keyboard::default(),
         key_output,
-        width: 1,
+        width: WIDTH,
         height: HEIGHT,
         scale: 1,
         visible: false,
@@ -200,9 +201,8 @@ impl State {
 
     fn show(&mut self) -> Result<()> {
         self.layer.set_layer(Layer::Overlay);
-        self.layer
-            .set_anchor(Anchor::LEFT | Anchor::RIGHT | Anchor::BOTTOM);
-        self.layer.set_size(0, HEIGHT);
+        self.layer.set_anchor(Anchor::BOTTOM);
+        self.layer.set_size(WIDTH, HEIGHT);
         self.layer.set_exclusive_zone(0);
         self.layer
             .set_keyboard_interactivity(KeyboardInteractivity::None);
