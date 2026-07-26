@@ -23,6 +23,8 @@ pub struct Mapper {
     global_capture: Vec<bool>,
     mode_active: Vec<bool>,
     mode_capture: Vec<bool>,
+    layer_active: Vec<Vec<bool>>,
+    layer_capture: Vec<Vec<bool>>,
     held: IndexMap<HeldOutput, usize>,
     gamepad_axes: IndexMap<GamepadAxis, f32>,
     left_pad_haptic: TrackpadHapticState,
@@ -89,6 +91,16 @@ impl Mapper {
         let active_mode = config.default_mode.clone();
         let mode_active = vec![false; config.modes[&active_mode].bindings.len()];
         let mode_capture = vec![false; config.modes[&active_mode].bindings.len()];
+        let layer_active = config.modes[&active_mode]
+            .layers
+            .values()
+            .map(|layer| vec![false; layer.bindings.len()])
+            .collect();
+        let layer_capture = config.modes[&active_mode]
+            .layers
+            .values()
+            .map(|layer| vec![false; layer.bindings.len()])
+            .collect();
         let global_active = vec![false; config.global.bindings.len()];
         let global_capture = vec![false; config.global.bindings.len()];
 
@@ -99,6 +111,8 @@ impl Mapper {
             global_capture,
             mode_active,
             mode_capture,
+            layer_active,
+            layer_capture,
             held: IndexMap::new(),
             gamepad_axes: IndexMap::new(),
             left_pad_haptic: TrackpadHapticState::default(),
@@ -156,6 +170,20 @@ impl Mapper {
             for index in 0..binding_count {
                 let binding = &self.config.modes[&self.active_mode].bindings[index];
                 let was_active = self.mode_active[index];
+                let layer_overridden = self.config.modes[&self.active_mode]
+                    .layers
+                    .values()
+                    .enumerate()
+                    .any(|(layer_index, layer)| {
+                        let held = digital_active(&layer.hold, state);
+                        layer.bindings.iter().enumerate().any(
+                            |(binding_index, layer_binding)| {
+                                bindings_match(binding, layer_binding)
+                                    && (held
+                                        || self.layer_capture[layer_index][binding_index])
+                            },
+                        )
+                    });
                 let globally_consumed = binding
                     .input
                     .iter()
@@ -163,9 +191,11 @@ impl Mapper {
                     .any(|input| {
                         input_is_consumed(
                             input,
+                            binding,
                             &self.config.global.bindings,
                             &self.global_capture,
                             state,
+                            true,
                         )
                     });
                 let mode_consumed = binding
@@ -175,12 +205,16 @@ impl Mapper {
                     .any(|input| {
                         input_is_consumed(
                             input,
+                            binding,
                             &self.config.modes[&self.active_mode].bindings[..index],
                             &self.mode_capture[..index],
                             state,
+                            true,
                         )
                     });
-                let consumed = globally_consumed || mode_consumed;
+                let consumed = (layer_overridden && !was_active)
+                    || globally_consumed
+                    || mode_consumed;
                 let (active, pressed, released) = if consumed {
                     (false, false, false)
                 } else {
@@ -217,6 +251,153 @@ impl Mapper {
                     if mode_changed {
                         break;
                     }
+                }
+            }
+        }
+
+        if !mode_changed {
+            let layer_count = self.config.modes[&self.active_mode].layers.len();
+            for layer_index in 0..layer_count {
+                let layer = self.config.modes[&self.active_mode]
+                    .layers
+                    .get_index(layer_index)
+                    .unwrap()
+                    .1;
+                let layer_held = digital_active(&layer.hold, state);
+                let binding_count = layer.bindings.len();
+
+                for binding_index in 0..binding_count {
+                    let binding = &self.config.modes[&self.active_mode]
+                        .layers
+                        .get_index(layer_index)
+                        .unwrap()
+                        .1
+                        .bindings[binding_index];
+                    let was_active = self.layer_active[layer_index][binding_index];
+                    let base_latched = self.config.modes[&self.active_mode]
+                        .bindings
+                        .iter()
+                        .enumerate()
+                        .any(|(base_index, base)| {
+                            self.mode_active[base_index] && bindings_match(base, binding)
+                        });
+                    let earlier_layer_override = self.config.modes[&self.active_mode]
+                        .layers
+                        .values()
+                        .take(layer_index)
+                        .enumerate()
+                        .any(|(earlier_layer_index, earlier_layer)| {
+                            let earlier_held = digital_active(&earlier_layer.hold, state);
+                            earlier_layer.bindings.iter().enumerate().any(
+                                |(earlier_binding_index, earlier_binding)| {
+                                    bindings_match(binding, earlier_binding)
+                                        && (earlier_held
+                                            || self.layer_capture[earlier_layer_index]
+                                                [earlier_binding_index])
+                                },
+                            )
+                        });
+                    let globally_consumed = binding
+                        .input
+                        .iter()
+                        .chain(binding.chord.iter().flatten())
+                        .any(|input| {
+                            input_is_consumed(
+                                input,
+                                binding,
+                                &self.config.global.bindings,
+                                &self.global_capture,
+                                state,
+                                true,
+                            )
+                        });
+                    let mode_consumed = binding
+                        .input
+                        .iter()
+                        .chain(binding.chord.iter().flatten())
+                        .any(|input| {
+                            input_is_consumed(
+                                input,
+                                binding,
+                                &self.config.modes[&self.active_mode].bindings,
+                                &self.mode_capture,
+                                state,
+                                true,
+                            )
+                        });
+                    let layer_consumed = binding
+                        .input
+                        .iter()
+                        .chain(binding.chord.iter().flatten())
+                        .any(|input| {
+                            (0..=layer_index).any(|consumer_layer_index| {
+                                let consumer_layer = self.config.modes[&self.active_mode]
+                                    .layers
+                                    .get_index(consumer_layer_index)
+                                    .unwrap()
+                                    .1;
+                                let end = if consumer_layer_index == layer_index {
+                                    binding_index
+                                } else {
+                                    consumer_layer.bindings.len()
+                                };
+                                input_is_consumed(
+                                    input,
+                                    binding,
+                                    &consumer_layer.bindings[..end],
+                                    &self.layer_capture[consumer_layer_index][..end],
+                                    state,
+                                    digital_active(&consumer_layer.hold, state),
+                                )
+                            })
+                        });
+                    let suppressed = base_latched
+                        || earlier_layer_override
+                        || globally_consumed
+                        || mode_consumed
+                        || layer_consumed;
+                    let (active, pressed, released) = if !layer_held {
+                        (false, false, was_active)
+                    } else if suppressed {
+                        (false, false, false)
+                    } else {
+                        binding_transition(binding, was_active, state, self.previous.as_ref())
+                    };
+                    self.layer_active[layer_index][binding_index] = active;
+                    if active {
+                        self.layer_capture[layer_index][binding_index] = true;
+                    } else if self.layer_capture[layer_index][binding_index]
+                        && binding
+                            .input
+                            .iter()
+                            .chain(binding.chord.iter().flatten())
+                            .all(|input| !digital_active(input, state))
+                    {
+                        self.layer_capture[layer_index][binding_index] = false;
+                    }
+
+                    let should_apply = match binding.action {
+                        Action::Key { .. } | Action::Mouse { .. } | Action::Gamepad { .. } => {
+                            active != was_active
+                        }
+                        _ => match binding.activation {
+                            Activation::Press => pressed,
+                            Activation::Release => released,
+                        },
+                    };
+                    let action = should_apply.then(|| binding.action.clone());
+
+                    if let Some(action) = action {
+                        mode_changed |=
+                            self.apply_action(&action, active, was_active, &mut outputs);
+                        if mode_changed {
+                            break;
+                        }
+                    }
+                }
+
+                if mode_changed {
+                    break;
                 }
             }
         }
@@ -321,6 +502,16 @@ impl Mapper {
         self.global_capture = vec![false; self.config.global.bindings.len()];
         self.mode_active = vec![false; self.config.modes[&self.active_mode].bindings.len()];
         self.mode_capture = vec![false; self.config.modes[&self.active_mode].bindings.len()];
+        self.layer_active = self.config.modes[&self.active_mode]
+            .layers
+            .values()
+            .map(|layer| vec![false; layer.bindings.len()])
+            .collect();
+        self.layer_capture = self.config.modes[&self.active_mode]
+            .layers
+            .values()
+            .map(|layer| vec![false; layer.bindings.len()])
+            .collect();
         self.left_pad_haptic = TrackpadHapticState::default();
         self.right_pad_haptic = TrackpadHapticState::default();
         outputs.push(Output::ModeChanged {
@@ -336,6 +527,12 @@ impl Mapper {
         self.global_capture.fill(false);
         self.mode_active.fill(false);
         self.mode_capture.fill(false);
+        for active in &mut self.layer_active {
+            active.fill(false);
+        }
+        for capture in &mut self.layer_capture {
+            capture.fill(false);
+        }
         self.left_pad_haptic = TrackpadHapticState::default();
         self.right_pad_haptic = TrackpadHapticState::default();
         self.previous = None;
@@ -383,8 +580,19 @@ impl Mapper {
         self.active_mode.clear();
         self.active_mode.push_str(name);
         self.global_active.fill(false);
+        self.global_capture.fill(false);
         self.mode_active = vec![false; self.config.modes[name].bindings.len()];
         self.mode_capture = vec![false; self.config.modes[name].bindings.len()];
+        self.layer_active = self.config.modes[name]
+            .layers
+            .values()
+            .map(|layer| vec![false; layer.bindings.len()])
+            .collect();
+        self.layer_capture = self.config.modes[name]
+            .layers
+            .values()
+            .map(|layer| vec![false; layer.bindings.len()])
+            .collect();
         self.left_pad_haptic = TrackpadHapticState::default();
         self.right_pad_haptic = TrackpadHapticState::default();
         outputs.push(Output::ModeChanged {

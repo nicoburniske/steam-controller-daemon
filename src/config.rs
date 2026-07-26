@@ -49,6 +49,14 @@ impl Config {
                     .iter()
                     .map(|(name, mode)| (format!("mode {name:?}"), &mode.bindings)),
             )
+            .chain(self.modes.iter().flat_map(|(mode_name, mode)| {
+                mode.layers.iter().map(move |(layer_name, layer)| {
+                    (
+                        format!("mode {mode_name:?} layer {layer_name:?}"),
+                        &layer.bindings,
+                    )
+                })
+            }))
         {
             for (index, binding) in bindings.iter().enumerate() {
                 let location = format!("{scope} binding {index}");
@@ -134,6 +142,23 @@ impl Config {
         for (name, mode) in &self.modes {
             if name.trim().is_empty() {
                 errors.push("mode names must not be empty".to_owned());
+            }
+
+            for (layer_name, layer) in &mode.layers {
+                let location = format!("mode {name:?} layer {layer_name:?}");
+                if layer_name.trim().is_empty() {
+                    errors.push(format!("{location} name must not be empty"));
+                }
+                if let DigitalInput::Axis(threshold) = &layer.hold {
+                    if !threshold.threshold.is_finite()
+                        || threshold.threshold <= 0.0
+                        || threshold.threshold > 1.0
+                    {
+                        errors.push(format!(
+                            "{location} hold axis threshold must be finite and in (0, 1]"
+                        ));
+                    }
+                }
             }
 
             for (index, mapping) in mode.axes.iter().enumerate() {
@@ -226,6 +251,16 @@ pub struct Mode {
     pub bindings: Vec<Binding>,
     #[serde(default)]
     pub axes: Vec<AxisMapping>,
+    #[serde(default)]
+    pub layers: IndexMap<String, Layer>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct Layer {
+    pub hold: DigitalInput,
+    #[serde(default)]
+    pub bindings: Vec<Binding>,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
