@@ -1,0 +1,33 @@
+[package]
+name = "scd"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+
+[dependencies]
+bitflags = "2.9"
+clap = { version = "4.5", features = ["derive"] }
+env_logger = "0.11"
+evdev = "0.13"
+hidapi = { version = "2.6", default-features = false, features = ["linux-native-basic-udev"] }
+indexmap = { version = "2.9", features = ["serde"] }
+log = "0.4"
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+toml = { version = "0.9", features = ["preserve_order"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "scd"
+path = "src/bin/scd.rs"
+
+[[bin]]
+name = "scctl"
+path = "src/bin/scctl.rs"
