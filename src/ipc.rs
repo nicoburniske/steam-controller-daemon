@@ -25,6 +25,27 @@ pub struct NamedEvent {
     pub name: String,
 }
 
+#[derive(Debug, Clone, Copy, clap::ValueEnum, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+#[value(rename_all = "kebab-case")]
+pub enum HapticSound {
+    ControllerOn,
+    ControllerOff,
+    UpFive,
+    DownFive,
+    UpSix,
+    DownSix,
+    WhoopUpThree,
+    WhoopDown,
+    Pulse,
+    ToneLow,
+    ToneHigh,
+    SweepUp,
+    SweepDown,
+    TrillUp,
+    TrillDown,
+}
+
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
 pub struct OskState {
     pub visible: bool,
@@ -130,6 +151,9 @@ pub enum Request {
         name: String,
     },
     ModeNext,
+    Sound {
+        sound: HapticSound,
+    },
     Reload,
     Events,
     Osk,
@@ -377,6 +401,10 @@ impl Client {
 
     pub fn next_mode(&self) -> Result<()> {
         self.request_done(Request::ModeNext)
+    }
+
+    pub fn play_sound(&self, sound: HapticSound) -> Result<()> {
+        self.request_done(Request::Sound { sound })
     }
 
     pub fn reload(&self) -> Result<()> {

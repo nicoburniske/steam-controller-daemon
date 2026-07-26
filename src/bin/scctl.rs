@@ -1,6 +1,6 @@
-use clap::{Parser, Subcommand};
-use scd::{Client, Config, ResultExt};
-use std::path::PathBuf;
+use clap::{Parser, Subcommand, ValueEnum};
+use scd::{Client, Config, HapticSound, ResultExt};
+use std::{path::PathBuf, thread, time::Duration};
 
 #[derive(Parser)]
 #[command(version, about = "Control the Steam Controller daemon")]
@@ -20,6 +20,10 @@ enum Command {
     Mode {
         #[command(subcommand)]
         action: Option<ModeAction>,
+    },
+    Sound {
+        #[arg(value_enum)]
+        sound: Option<HapticSound>,
     },
     Reload,
     Events,
@@ -67,6 +71,14 @@ fn main() -> scd::Result<()> {
         Command::Mode {
             action: Some(ModeAction::Next),
         } => client.next_mode()?,
+        Command::Sound { sound: Some(sound) } => client.play_sound(sound)?,
+        Command::Sound { sound: None } => {
+            for &sound in HapticSound::value_variants() {
+                println!("{}", sound.to_possible_value().unwrap().get_name());
+                client.play_sound(sound)?;
+                thread::sleep(Duration::from_millis(700));
+            }
+        }
         Command::Reload => client.reload()?,
         Command::Events => {
             for event in client.events()? {

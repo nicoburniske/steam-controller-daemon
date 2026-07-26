@@ -25,14 +25,6 @@ pub fn imu_mode_report(enabled: bool) -> [u8; 64] {
     setting_report(48, if enabled { 0x0018 } else { 0 })
 }
 
-pub fn rumble_report(low_frequency: u16, high_frequency: u16) -> [u8; 10] {
-    let mut report = [0; 10];
-    report[0] = 0x80;
-    report[4..6].copy_from_slice(&low_frequency.to_le_bytes());
-    report[7..9].copy_from_slice(&high_frequency.to_le_bytes());
-    report
-}
-
 pub fn trackpad_click_pressure_report(trackpad: Trackpad, pressure: u16) -> [u8; 64] {
     setting_report(
         match trackpad {
@@ -43,18 +35,99 @@ pub fn trackpad_click_pressure_report(trackpad: Trackpad, pressure: u16) -> [u8;
     )
 }
 
-pub fn trackpad_haptic_report(trackpad: Trackpad) -> [u8; 4] {
-    [0x82, trackpad as u8, 1, (-15_i8) as u8]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Haptic {
+    Rumble {
+        low_frequency: u16,
+        high_frequency: u16,
+    },
+    TrackpadClick {
+        trackpad: Trackpad,
+        gain: i8,
+    },
+    Pulse {
+        on_us: u16,
+        off_us: u16,
+        repeat: u16,
+    },
+    Tone {
+        gain: i8,
+        frequency: u16,
+        duration_ms: u16,
+    },
+    LogSweep {
+        gain: i8,
+        duration_ms: u16,
+        start_frequency: u16,
+        end_frequency: u16,
+    },
+    Script {
+        script: u8,
+        gain: i8,
+    },
 }
 
-pub fn mode_switch_haptic_report() -> [u8; 8] {
-    let mut report = [0; 8];
-    report[0] = 0x81;
-    report[1] = 2;
-    report[2..4].copy_from_slice(&625_u16.to_le_bytes());
-    report[4..6].copy_from_slice(&625_u16.to_le_bytes());
-    report[6..8].copy_from_slice(&48_u16.to_le_bytes());
-    report
+impl Haptic {
+    pub fn encode(self, report: &mut [u8; 10]) -> usize {
+        report.fill(0);
+        match self {
+            Self::Rumble {
+                low_frequency,
+                high_frequency,
+            } => {
+                report[0] = 0x80;
+                report[4..6].copy_from_slice(&low_frequency.to_le_bytes());
+                report[7..9].copy_from_slice(&high_frequency.to_le_bytes());
+                10
+            }
+            Self::TrackpadClick { trackpad, gain } => {
+                report[..4].copy_from_slice(&[0x82, trackpad as u8, 1, gain as u8]);
+                4
+            }
+            Self::Pulse {
+                on_us,
+                off_us,
+                repeat,
+            } => {
+                report[0] = 0x81;
+                report[1] = 2;
+                report[2..4].copy_from_slice(&on_us.to_le_bytes());
+                report[4..6].copy_from_slice(&off_us.to_le_bytes());
+                report[6..8].copy_from_slice(&repeat.to_le_bytes());
+                8
+            }
+            Self::Tone {
+                gain,
+                frequency,
+                duration_ms,
+            } => {
+                report[0] = 0x83;
+                report[1] = 2;
+                report[2] = gain as u8;
+                report[3..5].copy_from_slice(&frequency.to_le_bytes());
+                report[5..7].copy_from_slice(&duration_ms.to_le_bytes());
+                10
+            }
+            Self::LogSweep {
+                gain,
+                duration_ms,
+                start_frequency,
+                end_frequency,
+            } => {
+                report[0] = 0x84;
+                report[1] = 2;
+                report[2] = gain as u8;
+                report[3..5].copy_from_slice(&duration_ms.to_le_bytes());
+                report[5..7].copy_from_slice(&start_frequency.to_le_bytes());
+                report[7..9].copy_from_slice(&end_frequency.to_le_bytes());
+                9
+            }
+            Self::Script { script, gain } => {
+                report[..4].copy_from_slice(&[0x85, 2, script, gain as u8]);
+                4
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -401,7 +474,7 @@ mod tests {
     }
 
     #[test]
-    fn builds_feature_and_rumble_reports() {
+    fn builds_feature_and_haptic_reports() {
         let lizard = lizard_mode_report(false);
         assert_eq!(&lizard[..6], &[1, 0x87, 3, 9, 0, 0]);
         assert!(lizard[6..].iter().all(|byte| *byte == 0));
@@ -410,10 +483,6 @@ mod tests {
         assert_eq!(&imu[..6], &[1, 0x87, 3, 48, 0x18, 0]);
 
         assert_eq!(
-            rumble_report(0x1234, 0x5678),
-            [0x80, 0, 0, 0, 0x34, 0x12, 0, 0x78, 0x56, 0]
-        );
-        assert_eq!(
             &trackpad_click_pressure_report(Trackpad::Left, 25)[..6],
             &[1, 0x87, 3, 52, 25, 0]
         );
@@ -421,11 +490,31 @@ mod tests {
             &trackpad_click_pressure_report(Trackpad::Right, 25)[..6],
             &[1, 0x87, 3, 53, 25, 0]
         );
-        assert_eq!(trackpad_haptic_report(Trackpad::Left), [0x82, 0, 1, 0xf1]);
-        assert_eq!(trackpad_haptic_report(Trackpad::Right), [0x82, 1, 1, 0xf1]);
+
+        let mut report = [0; 10];
+        let length = Haptic::Rumble {
+            low_frequency: 0x1234,
+            high_frequency: 0x5678,
+        }
+        .encode(&mut report);
         assert_eq!(
-            mode_switch_haptic_report(),
-            [0x81, 2, 0x71, 2, 0x71, 2, 48, 0]
+            &report[..length],
+            &[0x80, 0, 0, 0, 0x34, 0x12, 0, 0x78, 0x56, 0]
         );
+
+        let length = Haptic::TrackpadClick {
+            trackpad: Trackpad::Right,
+            gain: -15,
+        }
+        .encode(&mut report);
+        assert_eq!(&report[..length], &[0x82, 1, 1, 0xf1]);
+
+        let length = Haptic::Pulse {
+            on_us: 625,
+            off_us: 625,
+            repeat: 48,
+        }
+        .encode(&mut report);
+        assert_eq!(&report[..length], &[0x81, 2, 0x71, 2, 0x71, 2, 48, 0]);
     }
 }

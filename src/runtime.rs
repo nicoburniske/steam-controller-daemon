@@ -86,6 +86,12 @@ impl Daemon {
                         Self::publish_keyboard(&mapper, &mut keyboard, &ipc);
                         Response::Done
                     }
+                    Request::Sound { sound } => match device.play_haptic(sound) {
+                        Ok(()) => Response::Done,
+                        Err(error) => Response::Error {
+                            message: error.to_string(),
+                        },
+                    },
                     Request::Reload => match Config::load(&self.config_path) {
                         Ok(config) => {
                             device.set_trackpad_click_pressure(config.trackpads.click_pressure)?;

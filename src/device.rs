@@ -1,7 +1,7 @@
+use crate::ipc::HapticSound;
 use crate::protocol::{
-    ControllerState, PROTEUS_PRODUCT_ID, Report, Trackpad, VALVE_VENDOR_ID, imu_mode_report,
-    lizard_mode_report, mode_switch_haptic_report, parse_report, rumble_report,
-    trackpad_click_pressure_report, trackpad_haptic_report,
+    ControllerState, Haptic, PROTEUS_PRODUCT_ID, Report, Trackpad, VALVE_VENDOR_ID,
+    imu_mode_report, lizard_mode_report, parse_report, trackpad_click_pressure_report,
 };
 use hidapi::{HidApi, HidDevice};
 use std::ffi::CString;
@@ -162,32 +162,81 @@ impl DeviceManager {
     }
 
     pub fn rumble(&self, low_frequency: u16, high_frequency: u16) -> Result<()> {
-        if let Some(active) = self.active {
-            self.slots[active]
-                .device
-                .write(&rumble_report(low_frequency, high_frequency))
-                .whence()?;
-        }
-        Ok(())
+        self.write_haptic(Haptic::Rumble {
+            low_frequency,
+            high_frequency,
+        })
     }
 
     pub fn trackpad_haptic(&self, trackpad: Trackpad) -> Result<()> {
-        if let Some(active) = self.active {
-            self.slots[active]
-                .device
-                .write(&trackpad_haptic_report(trackpad))
-                .whence()?;
-        }
-        Ok(())
+        self.write_haptic(Haptic::TrackpadClick {
+            trackpad,
+            gain: -15,
+        })
     }
 
     pub fn mode_switch_haptic(&self) -> Result<()> {
-        if let Some(active) = self.active {
-            self.slots[active]
-                .device
-                .write(&mode_switch_haptic_report())
-                .whence()?;
-        }
+        self.play_haptic(HapticSound::ToneHigh)
+    }
+
+    pub fn play_haptic(&self, sound: HapticSound) -> Result<()> {
+        self.write_haptic(match sound {
+            HapticSound::ControllerOn => Haptic::Script { script: 1, gain: 0 },
+            HapticSound::ControllerOff => Haptic::Script { script: 5, gain: 0 },
+            HapticSound::UpFive => Haptic::Script { script: 6, gain: 0 },
+            HapticSound::DownFive => Haptic::Script { script: 7, gain: 0 },
+            HapticSound::UpSix => Haptic::Script { script: 8, gain: 0 },
+            HapticSound::DownSix => Haptic::Script { script: 9, gain: 0 },
+            HapticSound::WhoopUpThree => Haptic::Script {
+                script: 10,
+                gain: 0,
+            },
+            HapticSound::WhoopDown => Haptic::Script {
+                script: 11,
+                gain: 0,
+            },
+            HapticSound::Pulse => Haptic::Pulse {
+                on_us: 625,
+                off_us: 625,
+                repeat: 48,
+            },
+            HapticSound::ToneLow => Haptic::Tone {
+                gain: 0,
+                frequency: 440,
+                duration_ms: 120,
+            },
+            HapticSound::ToneHigh => Haptic::Tone {
+                gain: 0,
+                frequency: 880,
+                duration_ms: 90,
+            },
+            HapticSound::SweepUp => Haptic::LogSweep {
+                gain: 0,
+                duration_ms: 120,
+                start_frequency: 400,
+                end_frequency: 900,
+            },
+            HapticSound::SweepDown => Haptic::LogSweep {
+                gain: 0,
+                duration_ms: 120,
+                start_frequency: 900,
+                end_frequency: 400,
+            },
+            HapticSound::TrillUp => Haptic::Script { script: 3, gain: 0 },
+            HapticSound::TrillDown => Haptic::Script { script: 4, gain: 0 },
+        })
+    }
+
+    fn write_haptic(&self, haptic: Haptic) -> Result<()> {
+        let Some(active) = self.active else {
+            return Ok(());
+        };
+        let mut report = [0; 10];
+        let length = haptic.encode(&mut report);
+        self.slots[active]
+            .device
+            .write(&report[..length])
+            .whence()?;
         Ok(())
     }
 
