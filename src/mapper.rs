@@ -65,7 +65,6 @@ pub enum Output {
     },
     TrackpadHaptic {
         pad: Trackpad,
-        click: bool,
     },
     KeyboardToggle,
     Event {
@@ -383,7 +382,7 @@ impl Mapper {
                         timestamp_us,
                     )
                 {
-                    outputs.push(Output::TrackpadHaptic { pad, click });
+                    outputs.push(Output::TrackpadHaptic { pad });
                 }
             }
         }
@@ -1474,7 +1473,6 @@ mod tests {
         assert!(
             mapped(&mut mapper, &state).contains(&Output::TrackpadHaptic {
                 pad: Trackpad::Right,
-                click: false,
             })
         );
     }

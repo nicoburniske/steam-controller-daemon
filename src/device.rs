@@ -171,11 +171,11 @@ impl DeviceManager {
         Ok(())
     }
 
-    pub fn trackpad_haptic(&self, trackpad: Trackpad, click: bool) -> Result<()> {
+    pub fn trackpad_haptic(&self, trackpad: Trackpad) -> Result<()> {
         if let Some(active) = self.active {
             self.slots[active]
                 .device
-                .write(&trackpad_haptic_report(trackpad, click))
+                .write(&trackpad_haptic_report(trackpad))
                 .whence()?;
         }
         Ok(())

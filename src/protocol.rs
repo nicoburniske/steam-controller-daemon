@@ -43,13 +43,8 @@ pub fn trackpad_click_pressure_report(trackpad: Trackpad, pressure: u16) -> [u8;
     )
 }
 
-pub fn trackpad_haptic_report(trackpad: Trackpad, click: bool) -> [u8; 4] {
-    [
-        0x82,
-        trackpad as u8,
-        if click { 2 } else { 1 },
-        (-15_i8) as u8,
-    ]
+pub fn trackpad_haptic_report(trackpad: Trackpad) -> [u8; 4] {
+    [0x82, trackpad as u8, 1, (-15_i8) as u8]
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -416,13 +411,7 @@ mod tests {
             &trackpad_click_pressure_report(Trackpad::Right, 25)[..6],
             &[1, 0x87, 3, 53, 25, 0]
         );
-        assert_eq!(
-            trackpad_haptic_report(Trackpad::Left, false),
-            [0x82, 0, 1, 0xf1]
-        );
-        assert_eq!(
-            trackpad_haptic_report(Trackpad::Right, true),
-            [0x82, 1, 2, 0xf1]
-        );
+        assert_eq!(trackpad_haptic_report(Trackpad::Left), [0x82, 0, 1, 0xf1]);
+        assert_eq!(trackpad_haptic_report(Trackpad::Right), [0x82, 1, 1, 0xf1]);
     }
 }

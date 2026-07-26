@@ -262,7 +262,7 @@ impl Daemon {
                     ipc.publish_event(name);
                 }
                 Output::ModeChanged { name } => log::info!("active mode: {name}"),
-                Output::TrackpadHaptic { pad, click } => device.trackpad_haptic(pad, click)?,
+                Output::TrackpadHaptic { pad } => device.trackpad_haptic(pad)?,
                 output => outputs.emit(&output)?,
             }
         }
