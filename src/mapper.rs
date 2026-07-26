@@ -22,6 +22,7 @@ pub struct Mapper {
     global_active: Vec<bool>,
     global_capture: Vec<bool>,
     mode_active: Vec<bool>,
+    mode_capture: Vec<bool>,
     held: IndexMap<HeldOutput, usize>,
     gamepad_axes: IndexMap<GamepadAxis, f32>,
     left_pad_haptic: TrackpadHapticState,
@@ -87,6 +88,7 @@ impl Mapper {
         config.validate().map_err(MapperError::Config)?;
         let active_mode = config.default_mode.clone();
         let mode_active = vec![false; config.modes[&active_mode].bindings.len()];
+        let mode_capture = vec![false; config.modes[&active_mode].bindings.len()];
         let global_active = vec![false; config.global.bindings.len()];
         let global_capture = vec![false; config.global.bindings.len()];
 
@@ -96,6 +98,7 @@ impl Mapper {
             global_active,
             global_capture,
             mode_active,
+            mode_capture,
             held: IndexMap::new(),
             gamepad_axes: IndexMap::new(),
             left_pad_haptic: TrackpadHapticState::default(),
@@ -153,7 +156,7 @@ impl Mapper {
             for index in 0..binding_count {
                 let binding = &self.config.modes[&self.active_mode].bindings[index];
                 let was_active = self.mode_active[index];
-                let consumed = binding
+                let globally_consumed = binding
                     .input
                     .iter()
                     .chain(binding.chord.iter().flatten())
@@ -165,12 +168,38 @@ impl Mapper {
                             state,
                         )
                     });
+                let mode_consumed = binding
+                    .input
+                    .iter()
+                    .chain(binding.chord.iter().flatten())
+                    .any(|input| {
+                        input_is_consumed(
+                            input,
+                            &self.config.modes[&self.active_mode].bindings[..index],
+                            &self.mode_capture[..index],
+                            state,
+                        )
+                    });
+                let consumed = globally_consumed || mode_consumed;
                 let (active, pressed, released) = if consumed {
                     (false, false, false)
                 } else {
                     binding_transition(binding, was_active, state, self.previous.as_ref())
                 };
                 self.mode_active[index] = active;
+                if binding.consume {
+                    if pressed {
+                        self.mode_capture[index] = true;
+                    } else if self.mode_capture[index]
+                        && binding
+                            .input
+                            .iter()
+                            .chain(binding.chord.iter().flatten())
+                            .all(|input| !digital_active(input, state))
+                    {
+                        self.mode_capture[index] = false;
+                    }
+                }
 
                 let should_apply = match binding.action {
                     Action::Key { .. } | Action::Mouse { .. } | Action::Gamepad { .. } => {
@@ -291,6 +320,7 @@ impl Mapper {
         self.global_active = vec![false; self.config.global.bindings.len()];
         self.global_capture = vec![false; self.config.global.bindings.len()];
         self.mode_active = vec![false; self.config.modes[&self.active_mode].bindings.len()];
+        self.mode_capture = vec![false; self.config.modes[&self.active_mode].bindings.len()];
         self.left_pad_haptic = TrackpadHapticState::default();
         self.right_pad_haptic = TrackpadHapticState::default();
         outputs.push(Output::ModeChanged {
@@ -305,6 +335,7 @@ impl Mapper {
         self.global_active.fill(false);
         self.global_capture.fill(false);
         self.mode_active.fill(false);
+        self.mode_capture.fill(false);
         self.left_pad_haptic = TrackpadHapticState::default();
         self.right_pad_haptic = TrackpadHapticState::default();
         self.previous = None;
@@ -353,6 +384,7 @@ impl Mapper {
         self.active_mode.push_str(name);
         self.global_active.fill(false);
         self.mode_active = vec![false; self.config.modes[name].bindings.len()];
+        self.mode_capture = vec![false; self.config.modes[name].bindings.len()];
         self.left_pad_haptic = TrackpadHapticState::default();
         self.right_pad_haptic = TrackpadHapticState::default();
         outputs.push(Output::ModeChanged {
@@ -600,14 +632,15 @@ fn trackpad_haptic(
     if haptic.progress < TRACKPAD_HAPTIC_TICK_TRAVEL {
         return false;
     }
-    haptic.progress %= TRACKPAD_HAPTIC_TICK_TRAVEL;
     if haptic.last_tick.is_some_and(|(_, previous_timestamp_us)| {
         timestamp_delta_us(format, timestamp_us, previous_timestamp_us)
             < TRACKPAD_HAPTIC_MIN_INTERVAL_US
     }) {
+        haptic.progress = TRACKPAD_HAPTIC_TICK_TRAVEL;
         return false;
     }
 
+    haptic.progress %= TRACKPAD_HAPTIC_TICK_TRAVEL;
     haptic.last_tick = Some((format, timestamp_us));
     true
 }
@@ -946,6 +979,87 @@ mod tests {
                 .process(&x_then_steam)
                 .iter()
                 .any(|output| matches!(output, Output::Event { .. }))
+        );
+    }
+
+    #[test]
+    fn mode_chord_consumes_later_base_binding() {
+        let config = Config::parse(
+            r#"
+                version = 1
+                default_mode = "desktop"
+
+                [modes.desktop]
+                [[modes.desktop.bindings]]
+                chord = ["left-bumper", "dpad-up"]
+                consume = true
+                action = { type = "key", code = "KEY_PAGEUP" }
+                [[modes.desktop.bindings]]
+                input = "dpad-up"
+                action = { type = "key", code = "KEY_UP" }
+            "#,
+        )
+        .unwrap();
+        let mut mapper = Mapper::new(config).unwrap();
+
+        assert_eq!(mapper.process(&state_with(&[ProtocolButton::Lb])), []);
+        assert_eq!(
+            mapper.process(&state_with(&[ProtocolButton::Lb, ProtocolButton::DpadUp])),
+            [Output::Key {
+                code: "KEY_PAGEUP".to_owned(),
+                pressed: true,
+            }]
+        );
+        assert_eq!(
+            mapper.process(&state_with(&[ProtocolButton::Lb, ProtocolButton::DpadUp])),
+            []
+        );
+        assert_eq!(
+            mapper.process(&state_with(&[ProtocolButton::Lb])),
+            [Output::Key {
+                code: "KEY_PAGEUP".to_owned(),
+                pressed: false,
+            }]
+        );
+    }
+
+    #[test]
+    fn mode_capture_prevents_late_base_press_when_modifier_releases_first() {
+        let config = Config::parse(
+            r#"
+                version = 1
+                default_mode = "desktop"
+
+                [modes.desktop]
+                [[modes.desktop.bindings]]
+                chord = ["left-bumper", "dpad-up"]
+                consume = true
+                action = { type = "key", code = "KEY_PAGEUP" }
+                [[modes.desktop.bindings]]
+                input = "dpad-up"
+                action = { type = "key", code = "KEY_UP" }
+            "#,
+        )
+        .unwrap();
+        let mut mapper = Mapper::new(config).unwrap();
+
+        mapper.process(&state_with(&[ProtocolButton::Lb]));
+        mapper.process(&state_with(&[ProtocolButton::Lb, ProtocolButton::DpadUp]));
+        assert_eq!(
+            mapper.process(&state_with(&[ProtocolButton::DpadUp])),
+            [Output::Key {
+                code: "KEY_PAGEUP".to_owned(),
+                pressed: false,
+            }]
+        );
+        assert_eq!(mapper.process(&state_with(&[ProtocolButton::DpadUp])), []);
+        assert_eq!(mapper.process(&ControllerState::default()), []);
+        assert_eq!(
+            mapper.process(&state_with(&[ProtocolButton::DpadUp])),
+            [Output::Key {
+                code: "KEY_UP".to_owned(),
+                pressed: true,
+            }]
         );
     }
 
@@ -1379,12 +1493,12 @@ mod tests {
 
         state.right_pad.position[0] += 100.0 / 32767.0;
         state.trackpad_timestamp_us = Some(20_000);
-        assert!(!mapper.process(&state).contains(&Output::TrackpadHaptic {
+        assert!(mapper.process(&state).contains(&Output::TrackpadHaptic {
             pad: Trackpad::Right,
         }));
         state.right_pad.position[0] += 3000.0 / 32767.0;
         state.trackpad_timestamp_us = Some(20_001);
-        assert!(mapper.process(&state).contains(&Output::TrackpadHaptic {
+        assert!(!mapper.process(&state).contains(&Output::TrackpadHaptic {
             pad: Trackpad::Right,
         }));
 
@@ -1406,12 +1520,12 @@ mod tests {
         }));
         state.right_pad.position[0] += 100.0 / 32767.0;
         state.trackpad_timestamp_us = Some(282 * 32);
-        assert!(!mapper.process(&state).contains(&Output::TrackpadHaptic {
+        assert!(mapper.process(&state).contains(&Output::TrackpadHaptic {
             pad: Trackpad::Right,
         }));
         state.right_pad.position[0] += 3000.0 / 32767.0;
         state.trackpad_timestamp_us = Some(283 * 32);
-        assert!(mapper.process(&state).contains(&Output::TrackpadHaptic {
+        assert!(!mapper.process(&state).contains(&Output::TrackpadHaptic {
             pad: Trackpad::Right,
         }));
     }
