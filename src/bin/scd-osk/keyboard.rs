@@ -1,5 +1,5 @@
 use evdev::KeyCode;
-use scd::{OskBindings, OskPadSide, OskState};
+use scd::{OSK_PAD_LIMIT, OskBindings, OskPadSide, OskState};
 use std::sync::mpsc::Sender;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -25,10 +25,12 @@ impl Half {
         if !position.into_iter().all(f32::is_finite) {
             return None;
         }
-        let center = if self == Self::Left { 0.25 } else { 0.75 };
+        let center = if self == Self::Left { 0.275 } else { 0.725 };
         Some([
-            (center + position[0].clamp(-1.0, 1.0) * 0.3).clamp(0.0, 1.0),
-            (0.5 + position[1].clamp(-1.0, 1.0) * 0.6).clamp(0.0, 1.0),
+            (center + position[0].clamp(-OSK_PAD_LIMIT, OSK_PAD_LIMIT) / OSK_PAD_LIMIT * 0.275)
+                .clamp(0.0, 1.0),
+            (0.5 + position[1].clamp(-OSK_PAD_LIMIT, OSK_PAD_LIMIT) / OSK_PAD_LIMIT * 0.5)
+                .clamp(0.0, 1.0),
         ])
     }
 }
@@ -635,17 +637,20 @@ mod tests {
 
     #[test]
     fn pointer_halves_overlap() {
-        let left_outer = Half::Left.project([-1.0, -1.0]).unwrap();
-        let left_inner = Half::Left.project([1.0, 0.0]).unwrap();
-        let right_inner = Half::Right.project([-1.0, 0.0]).unwrap();
-        let right_outer = Half::Right.project([1.0, 1.0]).unwrap();
+        let left_outer = Half::Left
+            .project([-OSK_PAD_LIMIT, -OSK_PAD_LIMIT])
+            .unwrap();
+        let left_inner = Half::Left.project([OSK_PAD_LIMIT, 0.0]).unwrap();
+        let right_inner = Half::Right.project([-OSK_PAD_LIMIT, 0.0]).unwrap();
+        let right_outer = Half::Right.project([OSK_PAD_LIMIT, OSK_PAD_LIMIT]).unwrap();
         assert_eq!(left_outer, [0.0, 0.0]);
         assert!((left_inner[0] - 0.55).abs() < f32::EPSILON);
         assert!((right_inner[0] - 0.45).abs() < f32::EPSILON);
         assert_eq!(right_outer, [1.0, 1.0]);
+        let center = OSK_PAD_LIMIT * 9.0 / 11.0;
         assert_eq!(
-            hit_slot(Page::Letters, Half::Left, [5.0 / 6.0, 0.0]),
-            hit_slot(Page::Letters, Half::Right, [-5.0 / 6.0, 0.0])
+            hit_slot(Page::Letters, Half::Left, [center, 0.0]),
+            hit_slot(Page::Letters, Half::Right, [-center, 0.0])
         );
         assert_eq!(Half::Left.project([f32::NAN, 0.0]), None);
     }

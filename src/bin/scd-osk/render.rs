@@ -7,7 +7,7 @@ use blit::{
     input::Input,
     interact::WidgetId,
     keyboard::KeyboardRequest,
-    paint::{HorizontalAlign, TextOptions, TextRequest, VerticalAlign},
+    paint::{BoxShadow, HorizontalAlign, TextOptions, TextRequest, VerticalAlign},
     paint_list::PaintList,
     platform::PlatformImpl,
     resource::{ImageData, ImageId, StringData, StringId},
@@ -161,7 +161,7 @@ impl KeyboardRenderer {
                     } else {
                         Color::WHITE
                     };
-                    let inset = 2.0 + press * 2.0;
+                    let inset = 2.0;
                     let key = LogicalRect {
                         x: cell.x + inset,
                         y: cell.y + inset,
@@ -215,13 +215,27 @@ impl KeyboardRenderer {
                         } else {
                             text
                         })
-                        .uniform_radius(1.0 + press * 3.0)
+                        .uniform_radius(1.0)
                         .padding_x(if special { 10.0 } else { 2.0 })
                         .padding_y(if secondary.is_some() { 7.0 } else { 2.0 })
                         .text_size(if special { 17.0 } else { 22.0 })
                         .text_weight(600)
                         .text_options(text_options)
                         .render(ui, key);
+                    if press > 0.0 {
+                        let mut clip = ui.begin_clip(key);
+                        BoxShadow::new(
+                            LogicalRect {
+                                x: key.x,
+                                y: key.y - 3.0,
+                                width: key.width,
+                                height: 4.0,
+                            },
+                            Color::from_rgba8(0, 0, 0, (press * 230.0).round() as u8),
+                        )
+                        .blur(6.0)
+                        .render(&mut clip);
+                    }
                     if let Some(secondary) = secondary {
                         Button::new(secondary)
                             .id((slot, "secondary"))

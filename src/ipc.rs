@@ -92,7 +92,7 @@ pub struct OskClicks<'a> {
 const OSK_CLICK_HISTORY_LEN: usize = 16;
 const OSK_PAD_MIN_RESPONSE: f32 = 0.15;
 const OSK_PAD_FULL_RESPONSE_DISTANCE: f32 = 0.02;
-const OSK_PAD_VISIBLE_LIMIT: f32 = 5.0 / 6.0;
+pub const OSK_PAD_LIMIT: f32 = 5.0 / 6.0;
 
 pub struct Server {
     path: PathBuf,
@@ -200,11 +200,8 @@ impl OskState {
     }
 
     pub fn update_pad(&mut self, side: OskPadSide, mut pad: OskPad, record_rising_edge: bool) {
-        pad.position[0] = match side {
-            OskPadSide::Left => pad.position[0].clamp(-OSK_PAD_VISIBLE_LIMIT, 1.0),
-            OskPadSide::Right => pad.position[0].clamp(-1.0, OSK_PAD_VISIBLE_LIMIT),
-        };
-        pad.position[1] = pad.position[1].clamp(-OSK_PAD_VISIBLE_LIMIT, OSK_PAD_VISIBLE_LIMIT);
+        pad.position[0] = pad.position[0].clamp(-OSK_PAD_LIMIT, OSK_PAD_LIMIT);
+        pad.position[1] = pad.position[1].clamp(-OSK_PAD_LIMIT, OSK_PAD_LIMIT);
         let clicked = {
             let previous = match side {
                 OskPadSide::Left => &mut self.left,
@@ -660,16 +657,18 @@ mod tests {
 
         pad.position = [-1.0, 1.0];
         state.update_pad(OskPadSide::Left, pad, false);
-        assert_eq!(
-            state.left.position,
-            [-OSK_PAD_VISIBLE_LIMIT, OSK_PAD_VISIBLE_LIMIT]
-        );
+        assert_eq!(state.left.position, [-OSK_PAD_LIMIT, OSK_PAD_LIMIT]);
 
         pad.position = [1.0, -1.0];
         state.update_pad(OskPadSide::Right, pad, false);
-        assert_eq!(
-            state.right.position,
-            [OSK_PAD_VISIBLE_LIMIT, -OSK_PAD_VISIBLE_LIMIT]
-        );
+        assert_eq!(state.right.position, [OSK_PAD_LIMIT, -OSK_PAD_LIMIT]);
+
+        pad.position = [1.0, 0.0];
+        state.update_pad(OskPadSide::Left, pad, false);
+        assert_eq!(state.left.position[0], OSK_PAD_LIMIT);
+
+        pad.position = [-1.0, 0.0];
+        state.update_pad(OskPadSide::Right, pad, false);
+        assert_eq!(state.right.position[0], -OSK_PAD_LIMIT);
     }
 }
