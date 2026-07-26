@@ -15,11 +15,12 @@ pub struct Outputs {
     left_shift_held: bool,
     right_shift_held: bool,
     mouse: VirtualDevice,
-    mouse_remainder: (f32, f32),
-    scroll_remainder: (f32, f32),
+    mouse_remainder: [f32; 2],
+    scroll_remainder: [f32; 2],
     rumble: RumbleEffects,
 }
 
+#[derive(Default)]
 struct RumbleEffects {
     effects: [Option<(u16, u16)>; 16],
     active: u16,
@@ -133,9 +134,9 @@ impl Outputs {
             left_shift_held: false,
             right_shift_held: false,
             mouse,
-            mouse_remainder: (0.0, 0.0),
-            scroll_remainder: (0.0, 0.0),
-            rumble: RumbleEffects::new(),
+            mouse_remainder: [0.0; 2],
+            scroll_remainder: [0.0; 2],
+            rumble: RumbleEffects::default(),
         })
     }
 
@@ -225,40 +226,18 @@ impl Outputs {
                     .emit(&[InputEvent::new(EventType::ABSOLUTE.0, code.0, value)])
                     .whence()
             }
-            Output::MouseMotion { x, y } => {
-                self.mouse_remainder.0 += x;
-                self.mouse_remainder.1 += y;
-                let x = self.mouse_remainder.0.trunc() as i32;
-                let y = self.mouse_remainder.1.trunc() as i32;
-                self.mouse_remainder.0 -= x as f32;
-                self.mouse_remainder.1 -= y as f32;
-                if x == 0 && y == 0 {
-                    return Ok(());
-                }
-                self.mouse
-                    .emit(&[
-                        InputEvent::new(EventType::RELATIVE.0, RelativeAxisCode::REL_X.0, x),
-                        InputEvent::new(EventType::RELATIVE.0, RelativeAxisCode::REL_Y.0, y),
-                    ])
-                    .whence()
-            }
-            Output::Scroll { x, y } => {
-                self.scroll_remainder.0 += x;
-                self.scroll_remainder.1 += y;
-                let x = self.scroll_remainder.0.trunc() as i32;
-                let y = self.scroll_remainder.1.trunc() as i32;
-                self.scroll_remainder.0 -= x as f32;
-                self.scroll_remainder.1 -= y as f32;
-                if x == 0 && y == 0 {
-                    return Ok(());
-                }
-                self.mouse
-                    .emit(&[
-                        InputEvent::new(EventType::RELATIVE.0, RelativeAxisCode::REL_HWHEEL.0, x),
-                        InputEvent::new(EventType::RELATIVE.0, RelativeAxisCode::REL_WHEEL.0, y),
-                    ])
-                    .whence()
-            }
+            Output::MouseMotion { x, y } => Self::emit_relative(
+                &mut self.mouse,
+                &mut self.mouse_remainder,
+                [RelativeAxisCode::REL_X, RelativeAxisCode::REL_Y],
+                [*x, *y],
+            ),
+            Output::Scroll { x, y } => Self::emit_relative(
+                &mut self.mouse,
+                &mut self.scroll_remainder,
+                [RelativeAxisCode::REL_HWHEEL, RelativeAxisCode::REL_WHEEL],
+                [*x, *y],
+            ),
             Output::KeyboardToggle
             | Output::Event { .. }
             | Output::ModeChanged { .. }
@@ -324,17 +303,31 @@ impl Outputs {
 
         Ok(self.rumble.changed_output())
     }
+
+    fn emit_relative(
+        device: &mut VirtualDevice,
+        remainder: &mut [f32; 2],
+        axes: [RelativeAxisCode; 2],
+        value: [f32; 2],
+    ) -> Result<()> {
+        remainder[0] += value[0];
+        remainder[1] += value[1];
+        let output = remainder.map(|value| value.trunc() as i32);
+        remainder[0] -= output[0] as f32;
+        remainder[1] -= output[1] as f32;
+        if output == [0; 2] {
+            return Ok(());
+        }
+        device
+            .emit(&[
+                InputEvent::new(EventType::RELATIVE.0, axes[0].0, output[0]),
+                InputEvent::new(EventType::RELATIVE.0, axes[1].0, output[1]),
+            ])
+            .whence()
+    }
 }
 
 impl RumbleEffects {
-    fn new() -> Self {
-        Self {
-            effects: [None; 16],
-            active: 0,
-            last_output: (0, 0),
-        }
-    }
-
     fn upload(&mut self, requested_id: i16, effect: Option<(u16, u16)>) -> Option<i16> {
         let effect = effect?;
         let index = if requested_id >= 0 {
@@ -395,7 +388,7 @@ mod tests {
 
     #[test]
     fn positive_repeat_counts_start_rumble_and_zero_stops_it() {
-        let mut effects = RumbleEffects::new();
+        let mut effects = RumbleEffects::default();
         let id = effects.upload(-1, Some((12, 34))).unwrap();
 
         effects.set_playback(id, 3);
@@ -406,7 +399,7 @@ mod tests {
 
     #[test]
     fn rejected_upload_does_not_consume_an_effect_id() {
-        let mut effects = RumbleEffects::new();
+        let mut effects = RumbleEffects::default();
 
         assert_eq!(effects.upload(-1, None), None);
         assert_eq!(effects.upload(-1, Some((1, 2))), Some(0));

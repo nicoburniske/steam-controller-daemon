@@ -57,8 +57,9 @@ pub fn run(socket: PathBuf, font: Box<[u8]>) -> Result<()> {
     thread::Builder::new()
         .name("scd-osk-input".into())
         .spawn(move || {
+            let client = Client::new(input_socket);
             loop {
-                match Client::new(&input_socket).osk() {
+                match client.osk() {
                     Ok(mut stream) => {
                         for state in &mut stream {
                             match state {

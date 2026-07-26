@@ -33,8 +33,7 @@ pub struct Mapper {
     osk_active: Buttons,
     held: IndexMap<HeldOutput, usize>,
     gamepad_axes: [f32; 6],
-    left_pad_haptic: TrackpadHapticState,
-    right_pad_haptic: TrackpadHapticState,
+    trackpad_haptics: [TrackpadHapticState; 2],
     previous: Option<ControllerState>,
 }
 
@@ -103,8 +102,7 @@ impl Mapper {
             osk_active: Buttons::default(),
             held: IndexMap::new(),
             gamepad_axes: [0.0; 6],
-            left_pad_haptic: TrackpadHapticState::default(),
-            right_pad_haptic: TrackpadHapticState::default(),
+            trackpad_haptics: Default::default(),
             previous: None,
         }
     }
@@ -123,36 +121,28 @@ impl Mapper {
         keyboard_visible: bool,
         outputs: &mut Vec<Output>,
     ) {
-        let mut mode_changed = false;
+        let mut interrupted = false;
 
         for index in 0..self.config.global.bindings.len() {
             let was_active = self.global[index].active;
             let chord = &self.config.global.bindings[index].chord;
-            let all_active = chord.iter().all(|button| button_active(*button, state));
+            let all_active = chord.iter().all(|button| state.buttons.contains(*button));
             let trigger = *chord.last().expect("validated chord is nonempty");
             let pressed = all_active
                 && !self
                     .previous
                     .as_ref()
-                    .is_some_and(|previous| button_active(trigger, previous))
+                    .is_some_and(|previous| previous.buttons.contains(trigger))
                 && chord[..chord.len() - 1].iter().all(|button| {
                     self.previous
                         .as_ref()
-                        .is_some_and(|previous| button_active(*button, previous))
+                        .is_some_and(|previous| previous.buttons.contains(*button))
                 });
             let active = if was_active { all_active } else { pressed };
             self.global[index].active = active;
             if pressed {
                 self.global[index].captured = true;
-            } else if self.global[index].captured
-                && !button_active(
-                    *self.config.global.bindings[index]
-                        .chord
-                        .last()
-                        .expect("validated chord is nonempty"),
-                    state,
-                )
-            {
+            } else if self.global[index].captured && !state.buttons.contains(trigger) {
                 self.global[index].captured = false;
             }
 
@@ -164,16 +154,26 @@ impl Mapper {
                         action,
                         Action::Key { .. } | Action::Mouse { .. } | Action::Gamepad { .. }
                     ));
-            let action = should_apply.then(|| action.clone());
-            if let Some(action) = action {
-                mode_changed |= self.apply_action(&action, active, outputs);
-                if mode_changed {
+            if should_apply {
+                interrupted |= self.apply_action(action.clone(), active, outputs).0;
+                if interrupted {
                     break;
                 }
             }
         }
 
-        if !mode_changed {
+        let mut reserved = Buttons::default();
+        for (binding, runtime) in self.config.global.bindings.iter().zip(&self.global) {
+            for button in binding
+                .chord
+                .iter()
+                .take_while(|button| runtime.captured || state.buttons.contains(**button))
+            {
+                reserved.insert(*button);
+            }
+        }
+
+        if !interrupted {
             for index in 0..self.config.osk.bindings.len() {
                 let (input, key) = {
                     let (input, key) = self
@@ -185,9 +185,8 @@ impl Mapper {
                     (*input, key.code())
                 };
                 let was_active = self.osk_active.contains(input);
-                let active = keyboard_visible
-                    && button_active(input, state)
-                    && !self.global_reserves(input, state);
+                let active =
+                    keyboard_visible && state.buttons.contains(input) && !reserved.contains(input);
                 if active == was_active {
                     continue;
                 }
@@ -200,17 +199,17 @@ impl Mapper {
             }
         }
 
-        if !keyboard_visible && !mode_changed {
+        if !keyboard_visible && !interrupted {
             self.quarantined.remove_inactive(state.buttons);
 
             let mut index = self.routes.len();
             while index != 0 {
                 index -= 1;
                 let route = &self.routes[index];
-                let released = !button_active(route.input, state);
-                let hold_lost = route.hold.is_some_and(|hold| {
-                    !button_active(hold, state) || self.global_reserves(hold, state)
-                });
+                let released = !state.buttons.contains(route.input);
+                let hold_lost = route
+                    .hold
+                    .is_some_and(|hold| !state.buttons.contains(hold) || reserved.contains(hold));
                 let captured = self.config.global.bindings.iter().zip(&self.global).any(
                     |(binding, runtime)| runtime.captured && binding.chord.contains(&route.input),
                 );
@@ -219,10 +218,12 @@ impl Mapper {
                 }
 
                 let route = self.routes.remove(index);
-                if button_active(route.input, state) && !self.quarantined.contains(route.input) {
+                if state.buttons.contains(route.input) && !self.quarantined.contains(route.input) {
                     self.quarantined.insert(route.input);
                 }
-                self.apply_action(&route.action, false, outputs);
+                if let Some(held) = route.held {
+                    self.set_held(held, false, outputs);
+                }
             }
 
             let binding_count = self.mode().bindings.len();
@@ -231,13 +232,13 @@ impl Mapper {
                 if !button_pressed(input, state, self.previous.as_ref())
                     || self.routes.iter().any(|route| route.input == input)
                     || self.quarantined.contains(input)
-                    || self.global_reserves(input, state)
+                    || reserved.contains(input)
                 {
                     continue;
                 }
                 let overridden = self.mode().layers.values().any(|layer| {
-                    button_active(layer.hold, state)
-                        && !self.global_reserves(layer.hold, state)
+                    state.buttons.contains(layer.hold)
+                        && !reserved.contains(layer.hold)
                         && layer.bindings.iter().any(|binding| binding.input == input)
                 });
                 if overridden {
@@ -245,19 +246,20 @@ impl Mapper {
                 }
 
                 let action = self.mode().bindings[index].action.clone();
-                mode_changed |= self.apply_action(&action, true, outputs);
-                if mode_changed {
+                let (stop, held) = self.apply_action(action, true, outputs);
+                interrupted |= stop;
+                if interrupted {
                     break;
                 }
                 self.routes.push(ActiveRoute {
                     input,
                     hold: None,
-                    action,
+                    held,
                 });
             }
         }
 
-        if !keyboard_visible && !mode_changed {
+        if !keyboard_visible && !interrupted {
             let layer_count = self.mode().layers.len();
             for layer_index in 0..layer_count {
                 let hold = self
@@ -267,7 +269,7 @@ impl Mapper {
                     .expect("layer index is valid")
                     .1
                     .hold;
-                if !button_active(hold, state) || self.global_reserves(hold, state) {
+                if !state.buttons.contains(hold) || reserved.contains(hold) {
                     continue;
                 }
                 let binding_count = self
@@ -290,7 +292,7 @@ impl Mapper {
                     if !button_pressed(input, state, self.previous.as_ref())
                         || self.routes.iter().any(|route| route.input == input)
                         || self.quarantined.contains(input)
-                        || self.global_reserves(input, state)
+                        || reserved.contains(input)
                     {
                         continue;
                     }
@@ -304,23 +306,24 @@ impl Mapper {
                         .bindings[binding_index]
                         .action
                         .clone();
-                    mode_changed |= self.apply_action(&action, true, outputs);
-                    if mode_changed {
+                    let (stop, held) = self.apply_action(action, true, outputs);
+                    interrupted |= stop;
+                    if interrupted {
                         break;
                     }
                     self.routes.push(ActiveRoute {
                         input,
                         hold: Some(hold),
-                        action,
+                        held,
                     });
                 }
-                if mode_changed {
+                if interrupted {
                     break;
                 }
             }
         }
 
-        if !keyboard_visible && !mode_changed {
+        if !keyboard_visible && !interrupted {
             let mapping_count = self.mode().axes.len();
             for index in 0..mapping_count {
                 let mapping = self.mode().axes[index];
@@ -355,29 +358,22 @@ impl Mapper {
             }
         }
 
-        if !mode_changed {
+        if !interrupted {
             let timestamp_us = state
                 .trackpad_timestamp_us
                 .unwrap_or(state.imu_timestamp_us);
-            if trackpad_haptic(
-                &mut self.left_pad_haptic,
-                state.left_pad,
-                state.format,
-                timestamp_us,
-            ) {
-                outputs.push(Output::TrackpadHaptic {
-                    pad: Trackpad::Left,
-                });
-            }
-            if trackpad_haptic(
-                &mut self.right_pad_haptic,
-                state.right_pad,
-                state.format,
-                timestamp_us,
-            ) {
-                outputs.push(Output::TrackpadHaptic {
-                    pad: Trackpad::Right,
-                });
+            for (pad, pad_state) in [
+                (Trackpad::Left, state.left_pad),
+                (Trackpad::Right, state.right_pad),
+            ] {
+                if trackpad_haptic(
+                    &mut self.trackpad_haptics[pad as usize],
+                    pad_state,
+                    state.format,
+                    timestamp_us,
+                ) {
+                    outputs.push(Output::TrackpadHaptic { pad });
+                }
             }
         }
 
@@ -397,30 +393,26 @@ impl Mapper {
         self.switch_mode(next, outputs);
     }
 
-    pub fn reload(&mut self, config: Config, outputs: &mut Vec<Output>) -> Result<()> {
-        config.validate()?;
-        let current = self.active_mode().to_owned();
-        self.release_outputs(outputs);
-        self.active_mode = config
+    pub fn reload(&mut self, config: Config, outputs: &mut Vec<Output>) {
+        let active_mode = config
             .modes
-            .get_index_of(&current)
+            .get_index_of(self.active_mode())
             .or_else(|| config.modes.get_index_of(&config.default_mode))
-            .expect("validated configuration has a default mode");
+            .expect("parsed configuration has a valid default mode");
+        self.release_outputs(outputs);
+        self.active_mode = active_mode;
         self.config = config;
         self.global = vec![GlobalState::default(); self.config.global.bindings.len()];
-        self.left_pad_haptic = TrackpadHapticState::default();
-        self.right_pad_haptic = TrackpadHapticState::default();
+        self.trackpad_haptics = Default::default();
         outputs.push(Output::ModeChanged {
             name: self.active_mode().to_owned(),
         });
-        Ok(())
     }
 
     pub fn release_all(&mut self, outputs: &mut Vec<Output>) {
         self.release_outputs(outputs);
         self.global.fill(GlobalState::default());
-        self.left_pad_haptic = TrackpadHapticState::default();
-        self.right_pad_haptic = TrackpadHapticState::default();
+        self.trackpad_haptics = Default::default();
         self.previous = None;
     }
 
@@ -460,60 +452,58 @@ impl Mapper {
             .1
     }
 
-    fn global_reserves(&self, input: Button, state: &ControllerState) -> bool {
-        self.config
-            .global
-            .bindings
-            .iter()
-            .zip(&self.global)
-            .any(|(binding, runtime)| {
-                (runtime.captured && binding.chord.contains(&input))
-                    || binding
-                        .chord
-                        .iter()
-                        .take_while(|button| button_active(**button, state))
-                        .any(|button| *button == input)
-            })
-    }
-
-    fn apply_action(&mut self, action: &Action, active: bool, outputs: &mut Vec<Output>) -> bool {
-        match action {
-            Action::Key { key } => self.set_held(HeldOutput::Key(*key), active, outputs),
-            Action::Mouse { button } => self.set_held(HeldOutput::Mouse(*button), active, outputs),
-            Action::Gamepad { button } => {
-                self.set_held(HeldOutput::Gamepad(*button), active, outputs)
-            }
-            Action::ModeSet { name } if active => {
-                let index = self
-                    .config
-                    .modes
-                    .get_index_of(name)
-                    .expect("validated mode target exists");
-                if index != self.active_mode {
-                    self.switch_mode(index, outputs);
-                    return true;
+    fn apply_action(
+        &mut self,
+        action: Action,
+        active: bool,
+        outputs: &mut Vec<Output>,
+    ) -> (bool, Option<HeldOutput>) {
+        let held = match action {
+            Action::Key { key } => Some(HeldOutput::Key(key)),
+            Action::Mouse { button } => Some(HeldOutput::Mouse(button)),
+            Action::Gamepad { button } => Some(HeldOutput::Gamepad(button)),
+            Action::ModeSet { name } => {
+                if active {
+                    let index = self
+                        .config
+                        .modes
+                        .get_index_of(&name)
+                        .expect("validated mode target exists");
+                    if index != self.active_mode {
+                        self.switch_mode(index, outputs);
+                        return (true, None);
+                    }
                 }
+                None
             }
-            Action::ModeNext if active => {
-                let next = (self.active_mode + 1) % self.config.modes.len();
-                if next != self.active_mode {
-                    self.switch_mode(next, outputs);
-                    return true;
+            Action::ModeNext => {
+                if active {
+                    let next = (self.active_mode + 1) % self.config.modes.len();
+                    if next != self.active_mode {
+                        self.switch_mode(next, outputs);
+                        return (true, None);
+                    }
                 }
+                None
             }
-            Action::KeyboardToggle if active => {
-                outputs.push(Output::KeyboardToggle);
-                return true;
+            Action::KeyboardToggle => {
+                if active {
+                    outputs.push(Output::KeyboardToggle);
+                    return (true, None);
+                }
+                None
             }
-            Action::Event { name } if active => {
-                outputs.push(Output::Event { name: name.clone() });
+            Action::Event { name } => {
+                if active {
+                    outputs.push(Output::Event { name });
+                }
+                None
             }
-            Action::ModeSet { .. }
-            | Action::ModeNext
-            | Action::KeyboardToggle
-            | Action::Event { .. } => {}
+        };
+        if let Some(held) = held {
+            self.set_held(held, active, outputs);
         }
-        false
+        (false, held)
     }
 
     fn switch_mode(&mut self, index: usize, outputs: &mut Vec<Output>) {
@@ -523,8 +513,7 @@ impl Mapper {
         self.release_outputs(outputs);
         self.active_mode = index;
         self.global.fill(GlobalState::default());
-        self.left_pad_haptic = TrackpadHapticState::default();
-        self.right_pad_haptic = TrackpadHapticState::default();
+        self.trackpad_haptics = Default::default();
         outputs.push(Output::ModeChanged {
             name: self.active_mode().to_owned(),
         });
@@ -585,7 +574,7 @@ struct GlobalState {
 struct ActiveRoute {
     input: Button,
     hold: Option<Button>,
-    action: Action,
+    held: Option<HeldOutput>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -623,7 +612,8 @@ fn button_pressed(
     current: &ControllerState,
     previous: Option<&ControllerState>,
 ) -> bool {
-    button_active(button, current) && !previous.is_some_and(|state| button_active(button, state))
+    current.buttons.contains(button)
+        && !previous.is_some_and(|state| state.buttons.contains(button))
 }
 
 fn trackpad_haptic(
@@ -685,10 +675,6 @@ fn timestamp_delta_us(format: StateFormat, current: u32, previous: u32) -> u32 {
     } else {
         current.wrapping_sub(previous)
     }
-}
-
-fn button_active(button: Button, state: &ControllerState) -> bool {
-    state.buttons.contains(button)
 }
 
 fn analog_value(
@@ -892,7 +878,6 @@ fn analog_value(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::Button as ProtocolButton;
 
     #[test]
     fn global_chord_is_ordered_consuming_and_edge_triggered() {
@@ -902,7 +887,7 @@ mod tests {
                 default_mode = "desktop"
                 [[global.bindings]]
                 chord = ["steam", "x"]
-                action = { type = "keyboard-toggle" }
+                action = { type = "event", name = "keyboard.toggle" }
                 [modes.desktop]
                 [[modes.desktop.bindings]]
                 input = "steam"
@@ -910,22 +895,32 @@ mod tests {
                 [[modes.desktop.bindings]]
                 input = "x"
                 action = { type = "key", key = "x" }
+                [modes.desktop.layers.apps]
+                hold = "left-bumper"
+                [[modes.desktop.layers.apps.bindings]]
+                input = "x"
+                action = { type = "key", key = "t" }
             "#,
         )
         .unwrap();
         let mut mapper = Mapper::new(config.clone());
 
         assert_eq!(
-            mapped(&mut mapper, &state_with(&[ProtocolButton::Steam])),
+            mapped(&mut mapper, &state_with(&[Button::Steam, Button::Lb])),
             []
         );
-        let chord = state_with(&[ProtocolButton::Steam, ProtocolButton::X]);
-        assert_eq!(mapped(&mut mapper, &chord), [Output::KeyboardToggle]);
+        let chord = state_with(&[Button::Steam, Button::Lb, Button::X]);
+        assert_eq!(
+            mapped(&mut mapper, &chord),
+            [Output::Event {
+                name: "keyboard.toggle".to_owned(),
+            }]
+        );
         assert_eq!(mapped(&mut mapper, &chord), []);
-        assert_eq!(mapped(&mut mapper, &state_with(&[ProtocolButton::X])), []);
+        assert_eq!(mapped(&mut mapper, &state_with(&[Button::X])), []);
         assert_eq!(mapped(&mut mapper, &ControllerState::default()), []);
         assert_eq!(
-            mapped(&mut mapper, &state_with(&[ProtocolButton::X])),
+            mapped(&mut mapper, &state_with(&[Button::X])),
             [Output::Key {
                 key: KeyCode::KEY_X,
                 pressed: true
@@ -934,24 +929,21 @@ mod tests {
 
         let mut mapper = Mapper::new(config);
         assert_eq!(
-            mapped(&mut mapper, &state_with(&[ProtocolButton::X])),
+            mapped(&mut mapper, &state_with(&[Button::X])),
             [Output::Key {
                 key: KeyCode::KEY_X,
                 pressed: true
             }]
         );
         assert!(
-            !mapped(
-                &mut mapper,
-                &state_with(&[ProtocolButton::X, ProtocolButton::Steam])
-            )
-            .iter()
-            .any(|output| matches!(output, Output::KeyboardToggle))
+            !mapped(&mut mapper, &state_with(&[Button::X, Button::Steam]))
+                .iter()
+                .any(|output| matches!(output, Output::Event { .. }))
         );
     }
 
     #[test]
-    fn visible_keyboard_suppresses_mode_outputs_but_keeps_global_toggle() {
+    fn keyboard_capture_suppresses_mode_outputs_without_repressing_held_controls() {
         let config = Config::parse(
             r#"
                 version = 1
@@ -976,33 +968,61 @@ mod tests {
         let mut mapper = Mapper::new(config);
 
         assert_eq!(
-            mapped(&mut mapper, &state_with(&[ProtocolButton::Steam])),
+            mapped(&mut mapper, &state_with(&[Button::A])),
+            [Output::Key {
+                key: KeyCode::KEY_ENTER,
+                pressed: true,
+            }]
+        );
+        assert_eq!(
+            mapped(&mut mapper, &state_with(&[Button::A, Button::Steam])),
             []
         );
         assert_eq!(
             mapped(
                 &mut mapper,
-                &state_with(&[ProtocolButton::Steam, ProtocolButton::X])
+                &state_with(&[Button::A, Button::Steam, Button::X,])
             ),
             [Output::KeyboardToggle]
         );
+        let mut outputs = Vec::new();
+        mapper.suspend(&mut outputs);
+        assert_eq!(
+            outputs,
+            [Output::Key {
+                key: KeyCode::KEY_ENTER,
+                pressed: false,
+            }]
+        );
 
-        let mut state = state_with(&[ProtocolButton::A]);
+        let mut state = state_with(&[Button::A]);
         state.right_pad.touched = true;
         state.right_pad.position = [0.1, 0.0];
         assert_eq!(keyboard_mapped(&mut mapper, &state), []);
         state.right_pad.position = [0.11, 0.0];
         assert_eq!(keyboard_mapped(&mut mapper, &state), []);
         assert_eq!(
-            keyboard_mapped(&mut mapper, &state_with(&[ProtocolButton::Steam])),
+            keyboard_mapped(&mut mapper, &state_with(&[Button::A, Button::Steam])),
             []
         );
         assert_eq!(
             keyboard_mapped(
                 &mut mapper,
-                &state_with(&[ProtocolButton::Steam, ProtocolButton::X, ProtocolButton::Y,])
+                &state_with(&[Button::A, Button::Steam, Button::X, Button::Y,])
             ),
             [Output::KeyboardToggle]
+        );
+        outputs.clear();
+        mapper.suspend(&mut outputs);
+        assert_eq!(outputs, []);
+        assert_eq!(mapped(&mut mapper, &state_with(&[Button::A])), []);
+        assert_eq!(mapped(&mut mapper, &ControllerState::default()), []);
+        assert_eq!(
+            mapped(&mut mapper, &state_with(&[Button::A])),
+            [Output::Key {
+                key: KeyCode::KEY_ENTER,
+                pressed: true,
+            }]
         );
     }
 
@@ -1013,54 +1033,28 @@ mod tests {
                 version = 1
                 default_mode = "desktop"
                 [osk.bindings]
-                l4 = "super"
-                l5 = "shift"
-                r4 = "control"
-                r5 = "alt"
+                l4 = "shift"
                 left-trigger-click = "shift"
-                right-trigger-click = "enter"
                 x = "backspace"
-                y = "space"
-                dpad-up = "up"
-                dpad-down = "down"
-                dpad-left = "left"
-                dpad-right = "right"
                 [modes.desktop]
             "#,
         )
         .unwrap();
         let mut mapper = Mapper::new(config);
-        let held = state_with(&[
-            ProtocolButton::L4,
-            ProtocolButton::L5,
-            ProtocolButton::R4,
-            ProtocolButton::R5,
-            ProtocolButton::LeftTriggerClick,
-            ProtocolButton::X,
-            ProtocolButton::Y,
-            ProtocolButton::RightTriggerClick,
-            ProtocolButton::DpadUp,
-            ProtocolButton::DpadDown,
-            ProtocolButton::DpadLeft,
-            ProtocolButton::DpadRight,
-        ]);
-        let mut expected = [
-            KeyCode::KEY_LEFTMETA,
-            KeyCode::KEY_LEFTSHIFT,
-            KeyCode::KEY_LEFTCTRL,
-            KeyCode::KEY_LEFTALT,
-            KeyCode::KEY_ENTER,
-            KeyCode::KEY_BACKSPACE,
-            KeyCode::KEY_SPACE,
-            KeyCode::KEY_UP,
-            KeyCode::KEY_DOWN,
-            KeyCode::KEY_LEFT,
-            KeyCode::KEY_RIGHT,
-        ];
+        let held = state_with(&[Button::L4, Button::LeftTriggerClick, Button::X]);
 
         assert_eq!(
             keyboard_mapped(&mut mapper, &held),
-            expected.map(|key| Output::Key { key, pressed: true })
+            [
+                Output::Key {
+                    key: KeyCode::KEY_LEFTSHIFT,
+                    pressed: true,
+                },
+                Output::Key {
+                    key: KeyCode::KEY_BACKSPACE,
+                    pressed: true,
+                },
+            ]
         );
         assert!(mapper.keyboard_shifted());
         assert!(
@@ -1068,125 +1062,31 @@ mod tests {
                 .active_osk_bindings()
                 .any(|input| input == Button::L4)
         );
-        assert_eq!(keyboard_mapped(&mut mapper, &held), []);
+        assert_eq!(
+            keyboard_mapped(
+                &mut mapper,
+                &state_with(&[Button::LeftTriggerClick, Button::X])
+            ),
+            []
+        );
 
         let mut outputs = Vec::new();
         mapper.suspend(&mut outputs);
-        expected.reverse();
         assert_eq!(
             outputs,
-            expected.map(|key| Output::Key {
-                key,
-                pressed: false,
-            })
+            [
+                Output::Key {
+                    key: KeyCode::KEY_BACKSPACE,
+                    pressed: false,
+                },
+                Output::Key {
+                    key: KeyCode::KEY_LEFTSHIFT,
+                    pressed: false,
+                },
+            ]
         );
         assert!(!mapper.keyboard_shifted());
         assert_eq!(mapper.active_osk_bindings().count(), 0);
-    }
-
-    #[test]
-    fn keyboard_capture_does_not_repress_held_desktop_controls() {
-        let config = Config::parse(
-            r#"
-                version = 1
-                default_mode = "desktop"
-                [[global.bindings]]
-                chord = ["steam", "x"]
-                action = { type = "keyboard-toggle" }
-                [modes.desktop]
-                [[modes.desktop.bindings]]
-                input = "l4"
-                action = { type = "key", key = "super" }
-                [[modes.desktop.bindings]]
-                input = "a"
-                action = { type = "key", key = "enter" }
-                [[modes.desktop.bindings]]
-                input = "left-pad-click"
-                action = { type = "mouse", button = "left" }
-            "#,
-        )
-        .unwrap();
-        let mut mapper = Mapper::new(config);
-        let held = [
-            ProtocolButton::L4,
-            ProtocolButton::A,
-            ProtocolButton::LeftPadClick,
-        ];
-
-        assert_eq!(
-            mapped(&mut mapper, &state_with(&held)),
-            [
-                Output::Key {
-                    key: KeyCode::KEY_LEFTMETA,
-                    pressed: true,
-                },
-                Output::Key {
-                    key: KeyCode::KEY_ENTER,
-                    pressed: true,
-                },
-                Output::MouseButton {
-                    button: MouseButton::Left,
-                    pressed: true,
-                },
-            ]
-        );
-
-        let mut with_steam = held.to_vec();
-        with_steam.push(ProtocolButton::Steam);
-        assert_eq!(mapped(&mut mapper, &state_with(&with_steam)), []);
-        let mut with_toggle = with_steam.clone();
-        with_toggle.push(ProtocolButton::X);
-        assert_eq!(
-            mapped(&mut mapper, &state_with(&with_toggle)),
-            [Output::KeyboardToggle]
-        );
-
-        let mut outputs = Vec::new();
-        mapper.suspend(&mut outputs);
-        assert_eq!(
-            outputs,
-            [
-                Output::MouseButton {
-                    button: MouseButton::Left,
-                    pressed: false,
-                },
-                Output::Key {
-                    key: KeyCode::KEY_ENTER,
-                    pressed: false,
-                },
-                Output::Key {
-                    key: KeyCode::KEY_LEFTMETA,
-                    pressed: false,
-                },
-            ]
-        );
-
-        assert_eq!(keyboard_mapped(&mut mapper, &state_with(&held)), []);
-        assert_eq!(keyboard_mapped(&mut mapper, &state_with(&with_steam)), []);
-        assert_eq!(
-            keyboard_mapped(&mut mapper, &state_with(&with_toggle)),
-            [Output::KeyboardToggle]
-        );
-        assert_eq!(mapped(&mut mapper, &state_with(&with_toggle)), []);
-        assert_eq!(mapped(&mut mapper, &state_with(&held)), []);
-        assert_eq!(mapped(&mut mapper, &ControllerState::default()), []);
-        assert_eq!(
-            mapped(&mut mapper, &state_with(&held)),
-            [
-                Output::Key {
-                    key: KeyCode::KEY_LEFTMETA,
-                    pressed: true,
-                },
-                Output::Key {
-                    key: KeyCode::KEY_ENTER,
-                    pressed: true,
-                },
-                Output::MouseButton {
-                    button: MouseButton::Left,
-                    pressed: true,
-                },
-            ]
-        );
     }
 
     #[test]
@@ -1205,17 +1105,11 @@ mod tests {
                 [[modes.desktop.bindings]]
                 input = "b"
                 action = { type = "key", key = "escape" }
-                [[modes.desktop.bindings]]
-                input = "y"
-                action = { type = "key", key = "space" }
                 [modes.desktop.layers.apps]
                 hold = "left-bumper"
                 [[modes.desktop.layers.apps.bindings]]
                 input = "b"
                 action = { type = "key", key = "q" }
-                [[modes.desktop.layers.apps.bindings]]
-                input = "y"
-                action = { type = "key", key = "o" }
             "#,
         )
         .unwrap();
@@ -1224,7 +1118,7 @@ mod tests {
         assert_eq!(
             mapped(
                 &mut mapper,
-                &state_with(&[ProtocolButton::L4, ProtocolButton::Lb, ProtocolButton::B])
+                &state_with(&[Button::L4, Button::Lb, Button::B])
             ),
             [
                 Output::Key {
@@ -1237,29 +1131,10 @@ mod tests {
                 }
             ]
         );
-        assert_eq!(
-            mapped(
-                &mut mapper,
-                &state_with(&[
-                    ProtocolButton::L4,
-                    ProtocolButton::Lb,
-                    ProtocolButton::B,
-                    ProtocolButton::Y,
-                ])
-            ),
-            [Output::Key {
-                key: KeyCode::KEY_O,
-                pressed: true
-            }]
-        );
-
         let mut mapper = Mapper::new(config);
-        assert_eq!(mapped(&mut mapper, &state_with(&[ProtocolButton::Lb])), []);
+        assert_eq!(mapped(&mut mapper, &state_with(&[Button::Lb])), []);
         assert_eq!(
-            mapped(
-                &mut mapper,
-                &state_with(&[ProtocolButton::Lb, ProtocolButton::A])
-            ),
+            mapped(&mut mapper, &state_with(&[Button::Lb, Button::A])),
             [Output::Key {
                 key: KeyCode::KEY_ENTER,
                 pressed: true
@@ -1293,20 +1168,17 @@ mod tests {
         let mut mapper = Mapper::new(config.clone());
 
         assert_eq!(
-            mapped(&mut mapper, &state_with(&[ProtocolButton::B])),
+            mapped(&mut mapper, &state_with(&[Button::B])),
             [Output::Key {
                 key: KeyCode::KEY_ESC,
                 pressed: true
             }]
         );
         assert_eq!(
-            mapped(
-                &mut mapper,
-                &state_with(&[ProtocolButton::Lb, ProtocolButton::B])
-            ),
+            mapped(&mut mapper, &state_with(&[Button::Lb, Button::B])),
             []
         );
-        assert_eq!(mapped(&mut mapper, &state_with(&[ProtocolButton::B])), []);
+        assert_eq!(mapped(&mut mapper, &state_with(&[Button::B])), []);
         assert_eq!(
             mapped(&mut mapper, &ControllerState::default()),
             [Output::Key {
@@ -1319,7 +1191,7 @@ mod tests {
         assert_eq!(
             mapped(
                 &mut mapper,
-                &state_with(&[ProtocolButton::Lb, ProtocolButton::Rb, ProtocolButton::B,])
+                &state_with(&[Button::Lb, Button::Rb, Button::B,])
             ),
             [Output::Key {
                 key: KeyCode::KEY_Q,
@@ -1327,82 +1199,17 @@ mod tests {
             }]
         );
         assert_eq!(
-            mapped(
-                &mut mapper,
-                &state_with(&[ProtocolButton::Rb, ProtocolButton::B])
-            ),
+            mapped(&mut mapper, &state_with(&[Button::Rb, Button::B])),
             [Output::Key {
                 key: KeyCode::KEY_Q,
                 pressed: false
             }]
         );
-        assert_eq!(mapped(&mut mapper, &state_with(&[ProtocolButton::Rb])), []);
+        assert_eq!(mapped(&mut mapper, &state_with(&[Button::Rb])), []);
         assert_eq!(
-            mapped(
-                &mut mapper,
-                &state_with(&[ProtocolButton::Rb, ProtocolButton::B])
-            ),
+            mapped(&mut mapper, &state_with(&[Button::Rb, Button::B])),
             [Output::Key {
                 key: KeyCode::KEY_O,
-                pressed: true
-            }]
-        );
-    }
-
-    #[test]
-    fn global_chord_has_priority_over_layers() {
-        let config = Config::parse(
-            r#"
-                version = 1
-                default_mode = "desktop"
-                [[global.bindings]]
-                chord = ["steam", "x"]
-                action = { type = "event", name = "keyboard.toggle" }
-                [modes.desktop]
-                [[modes.desktop.bindings]]
-                input = "x"
-                action = { type = "key", key = "g" }
-                [modes.desktop.layers.apps]
-                hold = "left-bumper"
-                [[modes.desktop.layers.apps.bindings]]
-                input = "x"
-                action = { type = "key", key = "t" }
-            "#,
-        )
-        .unwrap();
-        let mut mapper = Mapper::new(config);
-
-        assert_eq!(
-            mapped(
-                &mut mapper,
-                &state_with(&[ProtocolButton::Steam, ProtocolButton::Lb])
-            ),
-            []
-        );
-        assert_eq!(
-            mapped(
-                &mut mapper,
-                &state_with(&[ProtocolButton::Steam, ProtocolButton::Lb, ProtocolButton::X,])
-            ),
-            [Output::Event {
-                name: "keyboard.toggle".to_owned()
-            }]
-        );
-        assert_eq!(
-            mapped(
-                &mut mapper,
-                &state_with(&[ProtocolButton::Lb, ProtocolButton::X])
-            ),
-            []
-        );
-        assert_eq!(mapped(&mut mapper, &state_with(&[ProtocolButton::Lb])), []);
-        assert_eq!(
-            mapped(
-                &mut mapper,
-                &state_with(&[ProtocolButton::Lb, ProtocolButton::X])
-            ),
-            [Output::Key {
-                key: KeyCode::KEY_T,
                 pressed: true
             }]
         );
@@ -1424,6 +1231,12 @@ mod tests {
                 [[modes.one.bindings]]
                 input = "b"
                 action = { type = "key", key = "enter" }
+                [[modes.one.bindings]]
+                input = "x"
+                action = { type = "mouse", button = "left" }
+                [[modes.one.bindings]]
+                input = "y"
+                action = { type = "gamepad", button = "south" }
                 [modes.two]
             "#,
         )
@@ -1432,7 +1245,7 @@ mod tests {
         assert_eq!(
             mapped(
                 &mut mapper,
-                &state_with(&[ProtocolButton::L4, ProtocolButton::A])
+                &state_with(&[Button::L4, Button::A, Button::X, Button::Y])
             ),
             [
                 Output::Key {
@@ -1442,13 +1255,21 @@ mod tests {
                 Output::Key {
                     key: KeyCode::KEY_ENTER,
                     pressed: true
+                },
+                Output::MouseButton {
+                    button: MouseButton::Left,
+                    pressed: true,
+                },
+                Output::GamepadButton {
+                    button: GamepadButton::South,
+                    pressed: true,
                 }
             ]
         );
         assert_eq!(
             mapped(
                 &mut mapper,
-                &state_with(&[ProtocolButton::L4, ProtocolButton::A, ProtocolButton::B])
+                &state_with(&[Button::L4, Button::A, Button::B, Button::X, Button::Y,])
             ),
             []
         );
@@ -1458,6 +1279,14 @@ mod tests {
         assert_eq!(
             outputs,
             [
+                Output::GamepadButton {
+                    button: GamepadButton::South,
+                    pressed: false,
+                },
+                Output::MouseButton {
+                    button: MouseButton::Left,
+                    pressed: false,
+                },
                 Output::Key {
                     key: KeyCode::KEY_ENTER,
                     pressed: false
@@ -1469,7 +1298,7 @@ mod tests {
             ]
         );
 
-        mapped(&mut mapper, &state_with(&[ProtocolButton::A]));
+        mapped(&mut mapper, &state_with(&[Button::A]));
         let mut outputs = Vec::new();
         mapper.next_mode(&mut outputs);
         assert_eq!(
@@ -1692,7 +1521,7 @@ mod tests {
             .expect("mouse motion output")
     }
 
-    fn state_with(buttons: &[ProtocolButton]) -> ControllerState {
+    fn state_with(buttons: &[Button]) -> ControllerState {
         let mut state = ControllerState::default();
         for button in buttons {
             state.buttons.insert(*button);

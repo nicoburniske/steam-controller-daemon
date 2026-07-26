@@ -92,11 +92,6 @@ impl Buttons {
         self.0 & button.mask() != 0
     }
 
-    #[cfg(test)]
-    pub const fn is_empty(self) -> bool {
-        self.0 == 0
-    }
-
     pub fn insert(&mut self, button: Button) {
         self.0 |= button.mask();
     }
@@ -309,7 +304,7 @@ mod tests {
             panic!("expected state report");
         };
         assert_eq!(state.format, StateFormat::Standard);
-        assert!(state.buttons.is_empty());
+        assert_eq!(state.buttons, Buttons::default());
         assert!((state.left_stick[0] - 222.0 / 32767.0).abs() < f32::EPSILON);
         assert!((state.left_stick[1] + 336.0 / 32767.0).abs() < f32::EPSILON);
         assert_eq!(state.imu_timestamp_us, 566_874);

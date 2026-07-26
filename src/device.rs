@@ -109,10 +109,7 @@ impl DeviceManager {
                     self.last_state = None;
                     self.slots.clear();
                     self.last_scan = Instant::now() - Duration::from_secs(2);
-                    if disconnected {
-                        return Ok(Some(DeviceEvent::Disconnected));
-                    }
-                    return Ok(None);
+                    return Ok(disconnected.then_some(DeviceEvent::Disconnected));
                 }
             }
         }

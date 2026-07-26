@@ -38,15 +38,7 @@ enum ControllerHint {
 
 impl KeyboardRenderer {
     pub fn new(font: Box<[u8]>, width: u32, height: u32, scale: u32) -> Result<Self> {
-        if width == 0 || height == 0 || scale == 0 {
-            return Err(Error::message("keyboard dimensions must be nonzero"));
-        }
-        let physical_width = width
-            .checked_mul(scale)
-            .ok_or_else(|| Error::message("keyboard width is too large"))?;
-        let physical_height = height
-            .checked_mul(scale)
-            .ok_or_else(|| Error::message("keyboard height is too large"))?;
+        let [physical_width, physical_height] = scaled_size(width, height, scale)?;
         let renderer = Renderer::new(
             VecBuffer::new(physical_width as usize, physical_height as usize),
             RendererConfig {
@@ -75,15 +67,7 @@ impl KeyboardRenderer {
         if [width, height] == self.logical_size && scale == self.scale {
             return Ok(());
         }
-        if width == 0 || height == 0 || scale == 0 {
-            return Err(Error::message("keyboard dimensions must be nonzero"));
-        }
-        let physical_width = width
-            .checked_mul(scale)
-            .ok_or_else(|| Error::message("keyboard width is too large"))?;
-        let physical_height = height
-            .checked_mul(scale)
-            .ok_or_else(|| Error::message("keyboard height is too large"))?;
+        let [physical_width, physical_height] = scaled_size(width, height, scale)?;
         let platform = self.runtime.platform();
         platform
             .renderer
@@ -296,6 +280,20 @@ impl KeyboardRenderer {
     pub fn physical_size(&self) -> [u32; 2] {
         self.physical_size
     }
+}
+
+fn scaled_size(width: u32, height: u32, scale: u32) -> Result<[u32; 2]> {
+    if width == 0 || height == 0 || scale == 0 {
+        return Err(Error::message("keyboard dimensions must be nonzero"));
+    }
+    Ok([
+        width
+            .checked_mul(scale)
+            .ok_or_else(|| Error::message("keyboard width is too large"))?,
+        height
+            .checked_mul(scale)
+            .ok_or_else(|| Error::message("keyboard height is too large"))?,
+    ])
 }
 
 impl ControllerHint {

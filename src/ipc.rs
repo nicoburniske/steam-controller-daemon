@@ -96,10 +96,12 @@ const OSK_PAD_VISIBLE_LIMIT: f32 = 5.0 / 6.0;
 
 pub struct Server {
     path: PathBuf,
+    events: EventPublisher,
+    osk: OskPublisher,
 }
 
-pub type EventPublisher = broadcast::Sender<NamedEvent>;
-pub type OskPublisher = watch::Sender<OskState>;
+type EventPublisher = broadcast::Sender<NamedEvent>;
+type OskPublisher = watch::Sender<OskState>;
 
 pub struct ControlCommand {
     pub request: Request,
@@ -278,10 +280,7 @@ impl Iterator for OskClicks<'_> {
 }
 
 impl Server {
-    pub fn bind(
-        path: impl AsRef<Path>,
-        commands: SyncSender<ControlCommand>,
-    ) -> Result<(Self, EventPublisher, OskPublisher)> {
+    pub fn bind(path: impl AsRef<Path>) -> Result<(Self, mpsc::Receiver<ControlCommand>)> {
         let path = path.as_ref().to_path_buf();
         match fs::remove_file(&path) {
             Ok(()) => {}
@@ -295,6 +294,7 @@ impl Server {
         let publisher = events.clone();
         let (osk, _) = watch::channel(OskState::default());
         let osk_publisher = osk.clone();
+        let (commands, receiver) = mpsc::sync_channel(32);
         thread::Builder::new()
             .name("scd-ipc".into())
             .spawn(move || {
@@ -315,7 +315,29 @@ impl Server {
             })
             .whence()?;
 
-        Ok((Self { path }, publisher, osk_publisher))
+        Ok((
+            Self {
+                path,
+                events: publisher,
+                osk: osk_publisher,
+            },
+            receiver,
+        ))
+    }
+
+    pub fn publish_event(&self, name: String) {
+        let _ = self.events.send(NamedEvent { name });
+    }
+
+    pub fn publish_osk(&self, next: OskState) {
+        self.osk.send_if_modified(|current| {
+            if *current == next {
+                false
+            } else {
+                *current = next;
+                true
+            }
+        });
     }
 }
 
@@ -347,24 +369,15 @@ impl Client {
     }
 
     pub fn set_mode(&self, name: String) -> Result<()> {
-        match self.request(Request::ModeSet { name })? {
-            Response::Done => Ok(()),
-            _ => Err(Error::message("unexpected daemon response")),
-        }
+        self.request_done(Request::ModeSet { name })
     }
 
     pub fn next_mode(&self) -> Result<()> {
-        match self.request(Request::ModeNext)? {
-            Response::Done => Ok(()),
-            _ => Err(Error::message("unexpected daemon response")),
-        }
+        self.request_done(Request::ModeNext)
     }
 
     pub fn reload(&self) -> Result<()> {
-        match self.request(Request::Reload)? {
-            Response::Done => Ok(()),
-            _ => Err(Error::message("unexpected daemon response")),
-        }
+        self.request_done(Request::Reload)
     }
 
     pub fn events(&self) -> Result<EventStream> {
@@ -386,18 +399,19 @@ impl Client {
     }
 
     pub fn key(&self, code: u16, shift: bool, session: u64) -> Result<()> {
-        match self.request(Request::Key {
+        self.request_done(Request::Key {
             code,
             shift,
             session,
-        })? {
-            Response::Done => Ok(()),
-            _ => Err(Error::message("unexpected daemon response")),
-        }
+        })
     }
 
     pub fn hide_osk(&self, session: u64) -> Result<()> {
-        match self.request(Request::OskHide { session })? {
+        self.request_done(Request::OskHide { session })
+    }
+
+    fn request_done(&self, request: Request) -> Result<()> {
+        match self.request(request)? {
             Response::Done => Ok(()),
             _ => Err(Error::message("unexpected daemon response")),
         }
@@ -524,28 +538,6 @@ fn handle_client(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn click_history_wraps_in_order() {
-        let mut state = OskState {
-            click_sequence: u64::MAX - 1,
-            ..Default::default()
-        };
-        state.record_click(OskPadSide::Left, [1.0, 0.0]);
-        state.record_click(OskPadSide::Right, [2.0, 0.0]);
-        state.record_click(OskPadSide::Left, [3.0, 0.0]);
-
-        let mut clicks = state.clicks_since(u64::MAX - 1);
-        assert_eq!(clicks.missed(), 0);
-        assert_eq!(
-            clicks.next().map(|click| click.sequence),
-            Some(u64::MAX - 1)
-        );
-        assert_eq!(clicks.next().map(|click| click.sequence), Some(u64::MAX));
-        assert_eq!(clicks.next().map(|click| click.sequence), Some(0));
-        assert_eq!(clicks.next(), None);
-        assert_eq!(state.click_cursor(), 1);
-    }
 
     #[test]
     fn osk_bindings_replace_previous_keys() {

@@ -1,15 +1,11 @@
 use crate::Result;
 use crate::config::{Config, is_keyboard_key};
 use crate::device::{DeviceEvent, DeviceManager};
-use crate::ipc::{
-    EventPublisher, NamedEvent, OskPadSide, OskPublisher, OskState, Request, Response, Server,
-    Status,
-};
+use crate::ipc::{OskPadSide, OskState, Request, Response, Server, Status};
 use crate::mapper::{Mapper, Output};
 use crate::output::Outputs;
 use evdev::KeyCode;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -32,17 +28,16 @@ impl Daemon {
         let mut mapped = Vec::new();
         let mut outputs = Outputs::new()?;
         let mut device = DeviceManager::new()?;
-        let (command_sender, commands) = mpsc::sync_channel(32);
-        let (_server, events, osk) = Server::bind(&self.socket_path, command_sender)?;
+        let (ipc, commands) = Server::bind(&self.socket_path)?;
         let mut keyboard = OskState::default();
         keyboard.set_bindings(mapper.osk_bindings());
-        osk.send_replace(keyboard);
+        Self::publish_keyboard(&mapper, &mut keyboard, &ipc);
         let mut keyboard_closed_at: Option<Instant> = None;
         let mut battery = None;
         let mut charging = None;
-        let mut last_lizard_refresh = Instant::now() - Duration::from_secs(4);
+        let mut last_lizard_refresh = Instant::now();
         let mut rumble = (0, 0);
-        let mut last_rumble = Instant::now() - Duration::from_millis(50);
+        let mut last_rumble = Instant::now();
 
         log::info!("active mode: {}", mapper.active_mode());
         loop {
@@ -62,18 +57,15 @@ impl Daemon {
                     },
                     Request::ModeSet { name } => match mapper.set_mode(&name, &mut mapped) {
                         Ok(()) => {
-                            keyboard.set_active_bindings(mapper.active_osk_bindings());
-                            keyboard.shift_held = mapper.keyboard_shifted();
-                            osk.send_replace(keyboard);
                             Self::emit(
                                 &mut mapped,
                                 &mut mapper,
                                 &mut outputs,
-                                &events,
+                                &ipc,
                                 &device,
                                 &mut keyboard,
-                                &osk,
                             )?;
+                            Self::publish_keyboard(&mapper, &mut keyboard, &ipc);
                             Response::Done
                         }
                         Err(error) => Response::Error {
@@ -82,42 +74,32 @@ impl Daemon {
                     },
                     Request::ModeNext => {
                         mapper.next_mode(&mut mapped);
-                        keyboard.set_active_bindings(mapper.active_osk_bindings());
-                        keyboard.shift_held = mapper.keyboard_shifted();
-                        osk.send_replace(keyboard);
                         Self::emit(
                             &mut mapped,
                             &mut mapper,
                             &mut outputs,
-                            &events,
+                            &ipc,
                             &device,
                             &mut keyboard,
-                            &osk,
                         )?;
+                        Self::publish_keyboard(&mapper, &mut keyboard, &ipc);
                         Response::Done
                     }
                     Request::Reload => match Config::load(&self.config_path) {
-                        Ok(config) => match mapper.reload(config, &mut mapped) {
-                            Ok(()) => {
-                                keyboard.set_bindings(mapper.osk_bindings());
-                                keyboard.set_active_bindings(mapper.active_osk_bindings());
-                                keyboard.shift_held = mapper.keyboard_shifted();
-                                osk.send_replace(keyboard);
-                                Self::emit(
-                                    &mut mapped,
-                                    &mut mapper,
-                                    &mut outputs,
-                                    &events,
-                                    &device,
-                                    &mut keyboard,
-                                    &osk,
-                                )?;
-                                Response::Done
-                            }
-                            Err(error) => Response::Error {
-                                message: error.to_string(),
-                            },
-                        },
+                        Ok(config) => {
+                            mapper.reload(config, &mut mapped);
+                            keyboard.set_bindings(mapper.osk_bindings());
+                            Self::emit(
+                                &mut mapped,
+                                &mut mapper,
+                                &mut outputs,
+                                &ipc,
+                                &device,
+                                &mut keyboard,
+                            )?;
+                            Self::publish_keyboard(&mapper, &mut keyboard, &ipc);
+                            Response::Done
+                        }
                         Err(error) => Response::Error {
                             message: error.to_string(),
                         },
@@ -133,14 +115,13 @@ impl Daemon {
                                 &mut mapped,
                                 &mut mapper,
                                 &mut outputs,
-                                &events,
+                                &ipc,
                                 &device,
                                 &mut keyboard,
-                                &osk,
                             )?;
                             keyboard.set_visible(false);
                             keyboard_closed_at = None;
-                            osk.send_replace(keyboard);
+                            Self::publish_keyboard(&mapper, &mut keyboard, &ipc);
                             Response::Done
                         }
                     }
@@ -184,10 +165,9 @@ impl Daemon {
                             &mut mapped,
                             &mut mapper,
                             &mut outputs,
-                            &events,
+                            &ipc,
                             &device,
                             &mut keyboard,
-                            &osk,
                         )?;
                         match (was_visible, keyboard.visible) {
                             (true, false) => keyboard_closed_at = Some(Instant::now()),
@@ -195,8 +175,7 @@ impl Daemon {
                             _ => {}
                         }
                         if keyboard.visible {
-                            keyboard.set_active_bindings(mapper.active_osk_bindings());
-                            keyboard.shift_held = mapper.keyboard_shifted();
+                            Self::sync_keyboard(&mapper, &mut keyboard);
                             for (side, source) in [
                                 (OskPadSide::Left, state.left_pad),
                                 (OskPadSide::Right, state.right_pad),
@@ -211,16 +190,8 @@ impl Daemon {
                                     was_visible,
                                 );
                             }
-                            let next = keyboard;
-                            osk.send_if_modified(|state| {
-                                if *state == next {
-                                    false
-                                } else {
-                                    *state = next;
-                                    true
-                                }
-                            });
                         }
+                        ipc.publish_osk(keyboard);
                     }
                     DeviceEvent::Battery {
                         percent,
@@ -235,14 +206,13 @@ impl Daemon {
                             &mut mapped,
                             &mut mapper,
                             &mut outputs,
-                            &events,
+                            &ipc,
                             &device,
                             &mut keyboard,
-                            &osk,
                         )?;
                         keyboard.set_visible(false);
                         keyboard_closed_at = None;
-                        osk.send_replace(keyboard);
+                        Self::publish_keyboard(&mapper, &mut keyboard, &ipc);
                         battery = None;
                         charging = None;
                         log::info!("controller disconnected");
@@ -272,10 +242,9 @@ impl Daemon {
         mapped: &mut Vec<Output>,
         mapper: &mut Mapper,
         outputs: &mut Outputs,
-        events: &EventPublisher,
+        ipc: &Server,
         device: &DeviceManager,
         keyboard: &mut OskState,
-        osk: &OskPublisher,
     ) -> Result<()> {
         if mapped
             .iter()
@@ -284,12 +253,11 @@ impl Daemon {
             mapped.retain(|output| !matches!(output, Output::KeyboardToggle));
             mapper.suspend(mapped);
             keyboard.set_visible(!keyboard.visible);
-            osk.send_replace(*keyboard);
         }
         for output in mapped.drain(..) {
             match output {
                 Output::Event { name } => {
-                    let _ = events.send(NamedEvent { name });
+                    ipc.publish_event(name);
                 }
                 Output::ModeChanged { name } => log::info!("active mode: {name}"),
                 Output::TrackpadHaptic { pad } => device.trackpad_haptic(pad)?,
@@ -297,5 +265,17 @@ impl Daemon {
             }
         }
         Ok(())
+    }
+
+    fn sync_keyboard(mapper: &Mapper, keyboard: &mut OskState) {
+        if keyboard.visible {
+            keyboard.set_active_bindings(mapper.active_osk_bindings());
+            keyboard.shift_held = mapper.keyboard_shifted();
+        }
+    }
+
+    fn publish_keyboard(mapper: &Mapper, keyboard: &mut OskState, ipc: &Server) {
+        Self::sync_keyboard(mapper, keyboard);
+        ipc.publish_osk(*keyboard);
     }
 }

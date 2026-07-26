@@ -4,7 +4,10 @@ use evdev::KeyCode;
 use indexmap::IndexMap;
 use serde::{Deserialize, Deserializer};
 
-use crate::{Error, Result as ScdResult, ResultExt, protocol::Button};
+use crate::{
+    Error, Result as ScdResult, ResultExt,
+    protocol::{Button, Buttons},
+};
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -98,59 +101,50 @@ impl Config {
                 ));
             }
 
+            let mut mode_inputs = Buttons::default();
             for (index, binding) in mode.bindings.iter().enumerate() {
-                if mode.bindings[..index]
-                    .iter()
-                    .any(|earlier| earlier.input == binding.input)
-                {
+                if mode_inputs.contains(binding.input) {
                     return Err(Error::message(format!(
                         "invalid configuration: mode {name:?} binding {index} duplicates input {:?}",
                         binding.input
                     )));
                 }
+                mode_inputs.insert(binding.input);
                 self.validate_action(&binding.action, false)?;
             }
 
-            for (layer_index, (layer_name, layer)) in mode.layers.iter().enumerate() {
+            let mut layer_holds = Buttons::default();
+            for (layer_name, layer) in &mode.layers {
                 if layer_name.trim().is_empty() {
                     return Err(Error::message(format!(
                         "invalid configuration: mode {name:?} layer names must not be empty"
                     )));
                 }
-                if mode
-                    .layers
-                    .values()
-                    .take(layer_index)
-                    .any(|earlier| earlier.hold == layer.hold)
-                {
+                if layer_holds.contains(layer.hold) {
                     return Err(Error::message(format!(
                         "invalid configuration: mode {name:?} layer {layer_name:?} hold conflicts with an earlier layer"
                     )));
                 }
-                if mode
-                    .bindings
-                    .iter()
-                    .any(|binding| binding.input == layer.hold)
-                {
+                layer_holds.insert(layer.hold);
+                if mode_inputs.contains(layer.hold) {
                     return Err(Error::message(format!(
                         "invalid configuration: mode {name:?} layer {layer_name:?} hold must not also be a mode binding"
                     )));
                 }
+                let mut layer_inputs = Buttons::default();
                 for (binding_index, binding) in layer.bindings.iter().enumerate() {
                     if binding.input == layer.hold {
                         return Err(Error::message(format!(
                             "invalid configuration: mode {name:?} layer {layer_name:?} binding {binding_index} must not use its hold button"
                         )));
                     }
-                    if layer.bindings[..binding_index]
-                        .iter()
-                        .any(|earlier| earlier.input == binding.input)
-                    {
+                    if layer_inputs.contains(binding.input) {
                         return Err(Error::message(format!(
                             "invalid configuration: mode {name:?} layer {layer_name:?} binding {binding_index} duplicates input {:?}",
                             binding.input
                         )));
                     }
+                    layer_inputs.insert(binding.input);
                     self.validate_action(&binding.action, false)?;
                 }
             }
@@ -420,7 +414,7 @@ pub enum AnalogSource {
     Gyro,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum AnalogTarget {
     GamepadLeftStick,

@@ -37,12 +37,6 @@ enum ModeAction {
 
 fn main() -> scd::Result<()> {
     let args = Args::parse();
-    if let Command::Validate { path } = args.command {
-        Config::load(path)?;
-        println!("configuration is valid");
-        return Ok(());
-    }
-
     let client = Client::new(args.socket);
     match args.command {
         Command::Status { json: true } => {
@@ -79,7 +73,10 @@ fn main() -> scd::Result<()> {
                 println!("{}", serde_json::to_string(&event?).whence()?);
             }
         }
-        Command::Validate { .. } => unreachable!(),
+        Command::Validate { path } => {
+            Config::load(path)?;
+            println!("configuration is valid");
+        }
     }
     Ok(())
 }

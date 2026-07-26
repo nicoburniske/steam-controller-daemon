@@ -307,9 +307,10 @@ impl Keyboard {
                 OskPadSide::Left => Half::Left,
                 OskPadSide::Right => Half::Right,
             };
-            let Some(action) = hit(self.page, half, click.position) else {
+            let Some(slot) = hit_slot(self.page, half, click.position) else {
                 continue;
             };
+            let action = rows(self.page)[usize::from(slot.row)][usize::from(slot.key)].action;
             match action {
                 Action::Key { code, shift } => {
                     let shift = match shift {
@@ -386,18 +387,13 @@ impl Keyboard {
             )
     }
 
-    pub fn disconnect(&mut self) -> bool {
-        let changed = self.shift_held
-            || self.active_bindings != 0
-            || self.pointers != [None, None]
-            || self.pressed != [false, false];
+    pub fn disconnect(&mut self) {
         self.initialized = false;
         self.visible = false;
         self.shift_held = false;
         self.active_bindings = 0;
         self.pointers = [None, None];
         self.pressed = [false, false];
-        changed
     }
 
     pub fn for_each_key(
@@ -475,11 +471,6 @@ impl Keyboard {
                         && matches!(configured, KeyCode::KEY_LEFTSHIFT | KeyCode::KEY_RIGHTSHIFT))
         })
     }
-}
-
-fn hit(page: Page, half: Half, position: [f32; 2]) -> Option<Action> {
-    let slot = hit_slot(page, half, position)?;
-    Some(rows(page)[usize::from(slot.row)][usize::from(slot.key)].action)
 }
 
 fn hit_slot(page: Page, half: Half, position: [f32; 2]) -> Option<Slot> {
@@ -638,7 +629,7 @@ mod tests {
         state.left.position[0] = -0.7;
         assert!(keyboard.update(state, &sender));
         assert_eq!(keyboard.pointer(Half::Left), Some([-0.7, -0.5]));
-        assert!(keyboard.disconnect());
+        keyboard.disconnect();
         assert_eq!(keyboard.pointer(Half::Left), None);
     }
 

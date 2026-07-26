@@ -14,6 +14,5 @@ struct Args {
 fn main() -> scd::Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     let args = Args::parse();
-    Daemon::new(args.config, args.socket).run()?;
-    Ok(())
+    Daemon::new(args.config, args.socket).run()
 }
