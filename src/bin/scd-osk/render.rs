@@ -86,29 +86,11 @@ impl KeyboardRenderer {
         self.runtime.render(Duration::ZERO, Input::None, |ui| {
             let screen = ui.screen();
             blit::paint::Rectangle::new(screen)
-                .background(Color::from_rgba8(5, 7, 10, 255))
-                .render(ui);
-
-            let side_margin = (screen.width * 0.045).clamp(12.0, 96.0);
-            let panel = LogicalRect {
-                x: side_margin,
-                y: 5.0,
-                width: (screen.width - side_margin * 2.0).max(0.0),
-                height: (screen.height - 10.0).max(0.0),
-            };
-            blit::paint::Rectangle::new(panel)
                 .background(Color::from_rgba8(35, 38, 46, 255))
-                .border(2.0, Color::from_rgba8(73, 78, 88, 255))
-                .uniform_radius(5.0)
                 .render(ui);
 
             let bindings = keyboard.bindings();
-            let grid = LogicalRect {
-                x: panel.x + 5.0,
-                y: panel.y + 5.0,
-                width: (panel.width - 10.0).max(0.0),
-                height: (panel.height - 10.0).max(0.0),
-            };
+            let grid = screen;
             let pointers = [Half::Left, Half::Right].map(|half| {
                 let inset_x = 19.0_f32.min(grid.width * 0.5);
                 let inset_y = 19.0_f32.min(grid.height * 0.5);
@@ -163,8 +145,33 @@ impl KeyboardRenderer {
                         width: (cell.width - 4.0).max(0.0),
                         height: (cell.height - 4.0).max(0.0),
                     };
+                    let hint = target.and_then(|target| {
+                        bindings
+                            .iter()
+                            .filter(|(_, configured)| {
+                                *configured == target
+                                    || target == KeyCode::KEY_LEFTSHIFT
+                                        && matches!(
+                                            *configured,
+                                            KeyCode::KEY_LEFTSHIFT | KeyCode::KEY_RIGHTSHIFT
+                                        )
+                            })
+                            .filter_map(|(input, _)| {
+                                ControllerHint::from(input).map(|hint| (input, hint))
+                            })
+                            .min_by_key(|(_, hint)| match hint {
+                                ControllerHint::Face(_) => 0,
+                                ControllerHint::Trigger(_) => 1,
+                                ControllerHint::Paddle(_) => 2,
+                                ControllerHint::Control(_) => 3,
+                            })
+                    });
                     let text_options = TextOptions {
-                        horizontal_align: HorizontalAlign::Center,
+                        horizontal_align: if hint.is_some() && special && primary != "Space" {
+                            HorizontalAlign::Right
+                        } else {
+                            HorizontalAlign::Center
+                        },
                         vertical_align: if secondary.is_some() {
                             VerticalAlign::Bottom
                         } else {
@@ -210,34 +217,18 @@ impl KeyboardRenderer {
                                 },
                             );
                     }
-                    if let Some(target) = target {
-                        let mut hint_x = key.x + 6.0;
-                        for (input, configured) in bindings.iter() {
-                            let same_key = configured == target
-                                || matches!(target, KeyCode::KEY_LEFTSHIFT)
-                                    && matches!(
-                                        configured,
-                                        KeyCode::KEY_LEFTSHIFT | KeyCode::KEY_RIGHTSHIFT
-                                    );
-                            let Some(hint) =
-                                same_key.then(|| ControllerHint::from(input)).flatten()
-                            else {
-                                continue;
-                            };
-                            let width = hint.width();
-                            render_hint(
-                                ui,
-                                hint,
-                                (slot, input),
-                                LogicalRect {
-                                    x: hint_x,
-                                    y: key.y + (key.height - 24.0) * 0.5,
-                                    width,
-                                    height: 24.0,
-                                },
-                            );
-                            hint_x += width + 4.0;
-                        }
+                    if let Some((input, hint)) = hint {
+                        render_hint(
+                            ui,
+                            hint,
+                            (slot, input),
+                            LogicalRect {
+                                x: key.x + 6.0,
+                                y: key.y + (key.height - 24.0) * 0.5,
+                                width: hint.width(),
+                                height: 24.0,
+                            },
+                        );
                     }
                 },
             );

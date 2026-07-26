@@ -154,7 +154,7 @@ const ALPHABET: Key = Key {
 };
 const TAB: Key = key!("Tab", KEY_TAB, 14);
 const SPACE: Key = key!("Space", KEY_SPACE, 60);
-const BACKSPACE: Key = key!("Backspace", KEY_BACKSPACE, 14);
+const BACKSPACE: Key = key!("Backspace", KEY_BACKSPACE, 20);
 const ENTER: Key = key!("Enter", KEY_ENTER, 17);
 const CLOSE: Key = Key {
     label: "Close",
