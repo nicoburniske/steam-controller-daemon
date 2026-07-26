@@ -169,6 +169,22 @@ impl Config {
                         ));
                     }
                 }
+                if let Some(acceleration) = mapping.acceleration {
+                    if !acceleration.is_finite() || acceleration < 0.0 {
+                        errors.push(format!(
+                            "{location} acceleration must be finite and non-negative"
+                        ));
+                    }
+                    if !matches!(
+                        mapping.source,
+                        AnalogSource::LeftPad | AnalogSource::RightPad
+                    ) || mapping.target != AnalogTarget::MouseMotion
+                    {
+                        errors.push(format!(
+                            "{location} acceleration is only valid for a trackpad source and mouse-motion target"
+                        ));
+                    }
+                }
                 if let Some(exponent) = mapping.exponent {
                     if !exponent.is_finite() || exponent <= 0.0 {
                         errors.push(format!(
@@ -262,6 +278,8 @@ pub struct AxisMapping {
     pub deadzone: Option<f32>,
     #[serde(default)]
     pub sensitivity: Option<f32>,
+    #[serde(default)]
+    pub acceleration: Option<f32>,
     #[serde(default)]
     pub curve: Curve,
     #[serde(default)]
@@ -483,6 +501,7 @@ mod tests {
                 source = "right-pad"
                 target = "mouse-motion"
                 sensitivity = 1.5
+                acceleration = 5.0
 
                 [modes."anything at all"]
             "#,
@@ -495,6 +514,10 @@ mod tests {
             ["couch browsing", "anything at all"]
         );
         assert!(config.global.bindings[0].consume);
+        assert_eq!(
+            config.modes["couch browsing"].axes[0].acceleration,
+            Some(5.0)
+        );
     }
 
     #[test]
@@ -562,6 +585,54 @@ mod tests {
                     .unwrap_err()
                     .to_string()
                     .contains("is not a keyboard key")
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_or_misapplied_acceleration() {
+        for (source, target, acceleration, expected) in [
+            (
+                "right-pad",
+                "mouse-motion",
+                "-1.0",
+                "acceleration must be finite and non-negative",
+            ),
+            (
+                "right-pad",
+                "mouse-motion",
+                "nan",
+                "acceleration must be finite and non-negative",
+            ),
+            (
+                "right-stick",
+                "mouse-motion",
+                "1.0",
+                "acceleration is only valid for a trackpad source and mouse-motion target",
+            ),
+            (
+                "left-pad",
+                "scroll",
+                "1.0",
+                "acceleration is only valid for a trackpad source and mouse-motion target",
+            ),
+        ] {
+            let source = format!(
+                r#"
+                    version = 1
+                    default_mode = "one"
+                    [modes.one]
+                    [[modes.one.axes]]
+                    source = "{source}"
+                    target = "{target}"
+                    acceleration = {acceleration}
+                "#
+            );
+            assert!(
+                Config::parse(&source)
+                    .unwrap_err()
+                    .to_string()
+                    .contains(expected)
             );
         }
     }

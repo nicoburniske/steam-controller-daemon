@@ -12,8 +12,8 @@ use crate::{
 
 const TRACKPAD_HAPTIC_MIN_TRAVEL: f32 = 45.0 / 32767.0;
 const TRACKPAD_HAPTIC_MAX_TRAVEL: f32 = 4000.0 / 32767.0;
-const TRACKPAD_HAPTIC_TICK_TRAVEL: f32 = 6500.0 / 32767.0;
-const TRACKPAD_HAPTIC_MIN_INTERVAL_US: u32 = 50_000;
+const TRACKPAD_HAPTIC_TICK_TRAVEL: f32 = 3200.0 / 32767.0;
+const TRACKPAD_HAPTIC_MIN_INTERVAL_US: u32 = 25_000;
 const TRACKPAD_SCROLL_MIN_RADIUS: f32 = 1.0 / 3.0;
 
 pub struct Mapper {
@@ -228,11 +228,14 @@ impl Mapper {
                 }
             }
 
+            let trackpad_timestamp_us = state
+                .trackpad_timestamp_us
+                .unwrap_or(state.imu_timestamp_us);
             if trackpad_haptic(
                 &mut self.left_pad_haptic,
                 state.left_pad,
                 state.format,
-                state.imu_timestamp_us,
+                trackpad_timestamp_us,
             ) {
                 outputs.push(Output::TrackpadHaptic {
                     pad: Trackpad::Left,
@@ -242,7 +245,7 @@ impl Mapper {
                 &mut self.right_pad_haptic,
                 state.right_pad,
                 state.format,
-                state.imu_timestamp_us,
+                trackpad_timestamp_us,
             ) {
                 outputs.push(Output::TrackpadHaptic {
                     pad: Trackpad::Right,
@@ -578,12 +581,18 @@ fn trackpad_haptic(
         return false;
     }
 
-    let Some(previous_position) = haptic.previous_position.replace(pad.position) else {
+    let Some(previous_position) = haptic.previous_position else {
+        haptic.previous_position = Some(pad.position);
         return false;
     };
     let travel =
         (pad.position[0] - previous_position[0]).hypot(pad.position[1] - previous_position[1]);
-    if !(TRACKPAD_HAPTIC_MIN_TRAVEL..=TRACKPAD_HAPTIC_MAX_TRAVEL).contains(&travel) {
+    if travel < TRACKPAD_HAPTIC_MIN_TRAVEL {
+        return false;
+    }
+    haptic.previous_position = Some(pad.position);
+    if travel > TRACKPAD_HAPTIC_MAX_TRAVEL {
+        haptic.progress = 0.0;
         return false;
     }
 
@@ -591,7 +600,7 @@ fn trackpad_haptic(
     if haptic.progress < TRACKPAD_HAPTIC_TICK_TRAVEL {
         return false;
     }
-    haptic.progress -= TRACKPAD_HAPTIC_TICK_TRAVEL;
+    haptic.progress %= TRACKPAD_HAPTIC_TICK_TRAVEL;
     if haptic.last_tick.is_some_and(|(_, previous_timestamp_us)| {
         timestamp_delta_us(format, timestamp_us, previous_timestamp_us)
             < TRACKPAD_HAPTIC_MIN_INTERVAL_US
@@ -832,8 +841,38 @@ fn analog_value(
     if magnitude <= deadzone {
         return AnalogValue::Vector([0.0, 0.0]);
     }
+    let acceleration_gain =
+        mapping
+            .acceleration
+            .filter(|value| *value > 0.0)
+            .map_or(1.0, |acceleration| {
+                previous
+                    .filter(|previous| previous.format == current.format)
+                    .and_then(|previous| {
+                        let (current_timestamp_us, previous_timestamp_us) = match (
+                            current.trackpad_timestamp_us,
+                            previous.trackpad_timestamp_us,
+                        ) {
+                            (Some(current), Some(previous)) => (current, previous),
+                            _ => (current.imu_timestamp_us, previous.imu_timestamp_us),
+                        };
+                        let delta_us = timestamp_delta_us(
+                            current.format,
+                            current_timestamp_us,
+                            previous_timestamp_us,
+                        );
+                        (1..=100_000)
+                            .contains(&delta_us)
+                            .then_some(delta_us as f32 / 1_000_000.0)
+                    })
+                    .map_or(1.0, |seconds| {
+                        let speed = magnitude / seconds;
+                        1.0 + acceleration * (1.0 - (-(speed / 4.0).powi(2)).exp())
+                    })
+            });
     let scaled_magnitude = ((magnitude - deadzone) / (1.0 - deadzone)).powf(exponent)
         * sensitivity
+        * acceleration_gain
         * relative_gyro_seconds;
     AnalogValue::Vector([
         value[0] / magnitude * scaled_magnitude,
@@ -1021,7 +1060,37 @@ mod tests {
     }
 
     #[test]
-    fn touchpad_mouse_mapping_uses_relative_motion_after_touch() {
+    fn touchpad_mouse_mapping_uses_relative_motion_with_acceleration_off() {
+        for acceleration in ["", "acceleration = 0.0"] {
+            let config = Config::parse(&format!(
+                r#"
+                version = 1
+                default_mode = "one"
+                [modes.one]
+                [[modes.one.axes]]
+                source = "right-pad"
+                target = "mouse-motion"
+                sensitivity = 2.0
+                {acceleration}
+            "#
+            ))
+            .unwrap();
+            let mut mapper = Mapper::new(config).unwrap();
+            let mut state = ControllerState::default();
+            state.right_pad.touched = true;
+            state.right_pad.position = [0.25, 0.5];
+            assert_eq!(mapper.process(&state), []);
+
+            state.right_pad.position = [0.5, 0.5];
+            assert_eq!(
+                mapper.process(&state),
+                [Output::MouseMotion { x: 0.5, y: 0.0 }]
+            );
+        }
+    }
+
+    #[test]
+    fn touchpad_acceleration_is_report_rate_independent() {
         let config = Config::parse(
             r#"
                 version = 1
@@ -1031,20 +1100,104 @@ mod tests {
                 source = "right-pad"
                 target = "mouse-motion"
                 sensitivity = 2.0
+                acceleration = 5.0
             "#,
         )
         .unwrap();
-        let mut mapper = Mapper::new(config).unwrap();
+        let mut slow = Mapper::new(config.clone()).unwrap();
+        let mut fast = Mapper::new(config).unwrap();
         let mut state = ControllerState::default();
         state.right_pad.touched = true;
-        state.right_pad.position = [0.25, 0.5];
-        assert_eq!(mapper.process(&state), []);
+        state.trackpad_timestamp_us = Some(0);
+        assert_eq!(slow.process(&state), []);
 
-        state.right_pad.position = [0.5, 0.5];
-        assert_eq!(
-            mapper.process(&state),
-            [Output::MouseMotion { x: 0.5, y: 0.0 }]
-        );
+        state.right_pad.position[0] = 0.08;
+        state.trackpad_timestamp_us = Some(20_000);
+        let slow_x = slow
+            .process(&state)
+            .into_iter()
+            .find_map(|output| match output {
+                Output::MouseMotion { x, y: 0.0 } => Some(x),
+                _ => None,
+            })
+            .unwrap();
+
+        state.right_pad.position[0] = 0.0;
+        state.trackpad_timestamp_us = Some(0);
+        assert_eq!(fast.process(&state), []);
+        state.right_pad.position[0] = 0.04;
+        state.trackpad_timestamp_us = Some(10_000);
+        let fast_x_1 = fast
+            .process(&state)
+            .into_iter()
+            .find_map(|output| match output {
+                Output::MouseMotion { x, y: 0.0 } => Some(x),
+                _ => None,
+            })
+            .unwrap();
+        state.right_pad.position[0] = 0.08;
+        state.trackpad_timestamp_us = Some(20_000);
+        let fast_x_2 = fast
+            .process(&state)
+            .into_iter()
+            .find_map(|output| match output {
+                Output::MouseMotion { x, y: 0.0 } => Some(x),
+                _ => None,
+            })
+            .unwrap();
+
+        assert!((slow_x - fast_x_1 - fast_x_2).abs() < 1e-6);
+        assert!(slow_x > 0.16);
+    }
+
+    #[test]
+    fn touchpad_acceleration_handles_wrapping_and_invalid_time() {
+        let config = Config::parse(
+            r#"
+                version = 1
+                default_mode = "one"
+                [modes.one]
+                [[modes.one.axes]]
+                source = "right-pad"
+                target = "mouse-motion"
+                sensitivity = 2.0
+                acceleration = 5.0
+            "#,
+        )
+        .unwrap();
+        let mut mapper = Mapper::new(config.clone()).unwrap();
+        let mut state = ControllerState::default();
+        state.right_pad.touched = true;
+        state.imu_timestamp_us = u32::MAX - 9_999;
+        assert_eq!(mapper.process(&state), []);
+        state.right_pad.position[0] = 0.04;
+        state.imu_timestamp_us = 10_000;
+        let x = mapper
+            .process(&state)
+            .into_iter()
+            .find_map(|output| match output {
+                Output::MouseMotion { x, y: 0.0 } => Some(x),
+                _ => None,
+            })
+            .unwrap();
+        let expected = 0.08 * (1.0 + 5.0 * (1.0 - (-0.25_f32).exp()));
+        assert!((x - expected).abs() < 1e-6);
+
+        let mut mapper = Mapper::new(config).unwrap();
+        state = ControllerState::default();
+        state.right_pad.touched = true;
+        assert_eq!(mapper.process(&state), []);
+        state.right_pad.position[0] = 0.04;
+        state.imu_timestamp_us = 100_001;
+        let x = mapper
+            .process(&state)
+            .into_iter()
+            .find_map(|output| match output {
+                Output::MouseMotion { x, y: 0.0 } => Some(x),
+                _ => None,
+            })
+            .unwrap();
+        assert!((x - 0.08).abs() < f32::EPSILON);
     }
 
     #[test]
@@ -1076,7 +1229,10 @@ mod tests {
             let radians = degrees.to_radians();
             state.left_pad.position = [radians.cos(), radians.sin()];
             let outputs = counterclockwise.process(&state);
-            let [Output::Scroll { x: 0.0, y }] = outputs.as_slice() else {
+            let Some(Output::Scroll { x: 0.0, y }) = outputs
+                .iter()
+                .find(|output| matches!(output, Output::Scroll { .. }))
+            else {
                 panic!("expected vertical scroll, got {outputs:?}");
             };
             assert!((*y + 10.0_f32.to_radians()).abs() < 1e-6);
@@ -1091,7 +1247,10 @@ mod tests {
             let radians = degrees.to_radians();
             state.left_pad.position = [radians.cos(), radians.sin()];
             let outputs = clockwise.process(&state);
-            let [Output::Scroll { x: 0.0, y }] = outputs.as_slice() else {
+            let Some(Output::Scroll { x: 0.0, y }) = outputs
+                .iter()
+                .find(|output| matches!(output, Output::Scroll { .. }))
+            else {
                 panic!("expected vertical scroll, got {outputs:?}");
             };
             assert!((*y - 10.0_f32.to_radians()).abs() < 1e-6);
@@ -1143,7 +1302,7 @@ mod tests {
     }
 
     #[test]
-    fn trackpad_haptic_accumulates_only_plausible_raw_travel() {
+    fn trackpad_haptic_accumulates_slow_travel_and_resets_on_teleport() {
         let config = Config::parse(
             r#"
                 version = 1
@@ -1160,24 +1319,30 @@ mod tests {
         state.right_pad.touched = true;
         mapper.process(&state);
 
-        state.right_pad.position[0] += 44.0 / 32767.0;
-        assert!(!mapper.process(&state).contains(&Output::TrackpadHaptic {
-            pad: Trackpad::Right
-        }));
-        state.right_pad.position[0] += 4001.0 / 32767.0;
-        assert!(!mapper.process(&state).contains(&Output::TrackpadHaptic {
-            pad: Trackpad::Right
-        }));
-
-        for _ in 0..3 {
-            state.right_pad.position[0] += 2000.0 / 32767.0;
-            assert!(!mapper.process(&state).contains(&Output::TrackpadHaptic {
-                pad: Trackpad::Right
-            }));
+        let mut ticked = false;
+        for _ in 0..74 {
+            state.right_pad.position[0] += 44.0 / 32767.0;
+            state.imu_timestamp_us += 1_000;
+            ticked |= mapper.process(&state).contains(&Output::TrackpadHaptic {
+                pad: Trackpad::Right,
+            });
         }
-        state.right_pad.position[0] += 2000.0 / 32767.0;
+        assert!(ticked);
+
+        state.right_pad.position[0] += 4001.0 / 32767.0;
+        state.imu_timestamp_us += 30_000;
+        assert!(!mapper.process(&state).contains(&Output::TrackpadHaptic {
+            pad: Trackpad::Right,
+        }));
+        state.right_pad.position[0] += 1700.0 / 32767.0;
+        state.imu_timestamp_us += 30_000;
+        assert!(!mapper.process(&state).contains(&Output::TrackpadHaptic {
+            pad: Trackpad::Right,
+        }));
+        state.right_pad.position[0] += 1700.0 / 32767.0;
+        state.imu_timestamp_us += 30_000;
         assert!(mapper.process(&state).contains(&Output::TrackpadHaptic {
-            pad: Trackpad::Right
+            pad: Trackpad::Right,
         }));
     }
 
@@ -1197,65 +1362,57 @@ mod tests {
         let mut mapper = Mapper::new(config.clone()).unwrap();
         let mut state = ControllerState::default();
         state.right_pad.touched = true;
-        state.imu_timestamp_us = u32::MAX - 9_999;
+        state.trackpad_timestamp_us = Some(u32::MAX - 10_000);
         mapper.process(&state);
 
-        state.right_pad.position[0] += 3500.0 / 32767.0;
-        state.imu_timestamp_us = u32::MAX - 4_999;
-        mapper.process(&state);
-        state.right_pad.position[0] += 3500.0 / 32767.0;
-        state.imu_timestamp_us = 0;
+        state.right_pad.position[0] += 3300.0 / 32767.0;
+        state.trackpad_timestamp_us = Some(u32::MAX - 5_000);
         assert!(mapper.process(&state).contains(&Output::TrackpadHaptic {
-            pad: Trackpad::Right
+            pad: Trackpad::Right,
         }));
 
-        state.right_pad.position[0] += 3500.0 / 32767.0;
-        state.imu_timestamp_us = 20_000;
-        mapper.process(&state);
-        state.right_pad.position[0] += 3500.0 / 32767.0;
-        state.imu_timestamp_us = 30_000;
+        state.right_pad.position[0] += 3300.0 / 32767.0;
+        state.trackpad_timestamp_us = Some(5_000);
         assert!(!mapper.process(&state).contains(&Output::TrackpadHaptic {
-            pad: Trackpad::Right
+            pad: Trackpad::Right,
         }));
 
-        state.right_pad.position[0] += 3500.0 / 32767.0;
-        state.imu_timestamp_us = 40_000;
-        mapper.process(&state);
-        state.right_pad.position[0] += 3500.0 / 32767.0;
-        state.imu_timestamp_us = 50_000;
+        state.right_pad.position[0] += 100.0 / 32767.0;
+        state.trackpad_timestamp_us = Some(20_000);
+        assert!(!mapper.process(&state).contains(&Output::TrackpadHaptic {
+            pad: Trackpad::Right,
+        }));
+        state.right_pad.position[0] += 3000.0 / 32767.0;
+        state.trackpad_timestamp_us = Some(20_001);
         assert!(mapper.process(&state).contains(&Output::TrackpadHaptic {
-            pad: Trackpad::Right
+            pad: Trackpad::Right,
         }));
 
         let mut mapper = Mapper::new(config).unwrap();
         state = ControllerState::default();
         state.format = StateFormat::Timestamp32Us;
         state.right_pad.touched = true;
-        state.imu_timestamp_us = u32::from(u16::MAX - 999) * 32;
+        state.trackpad_timestamp_us = Some(u32::from(u16::MAX - 1000) * 32);
         mapper.process(&state);
-        state.right_pad.position[0] += 3500.0 / 32767.0;
-        state.imu_timestamp_us = u32::from(u16::MAX - 499) * 32;
-        mapper.process(&state);
-        state.right_pad.position[0] += 3500.0 / 32767.0;
-        state.imu_timestamp_us = 0;
+        state.right_pad.position[0] += 3300.0 / 32767.0;
+        state.trackpad_timestamp_us = Some(u32::from(u16::MAX - 500) * 32);
         assert!(mapper.process(&state).contains(&Output::TrackpadHaptic {
-            pad: Trackpad::Right
+            pad: Trackpad::Right,
         }));
-        state.right_pad.position[0] += 3500.0 / 32767.0;
-        state.imu_timestamp_us = 750 * 32;
-        mapper.process(&state);
-        state.right_pad.position[0] += 3500.0 / 32767.0;
-        state.imu_timestamp_us = 1_250 * 32;
+        state.right_pad.position[0] += 3300.0 / 32767.0;
+        state.trackpad_timestamp_us = Some(0);
         assert!(!mapper.process(&state).contains(&Output::TrackpadHaptic {
-            pad: Trackpad::Right
+            pad: Trackpad::Right,
         }));
-        state.right_pad.position[0] += 3500.0 / 32767.0;
-        state.imu_timestamp_us = 1_500 * 32;
-        mapper.process(&state);
-        state.right_pad.position[0] += 3500.0 / 32767.0;
-        state.imu_timestamp_us = 1_563 * 32;
+        state.right_pad.position[0] += 100.0 / 32767.0;
+        state.trackpad_timestamp_us = Some(282 * 32);
+        assert!(!mapper.process(&state).contains(&Output::TrackpadHaptic {
+            pad: Trackpad::Right,
+        }));
+        state.right_pad.position[0] += 3000.0 / 32767.0;
+        state.trackpad_timestamp_us = Some(283 * 32);
         assert!(mapper.process(&state).contains(&Output::TrackpadHaptic {
-            pad: Trackpad::Right
+            pad: Trackpad::Right,
         }));
     }
 
@@ -1281,28 +1438,33 @@ mod tests {
         state.right_pad.touched = true;
         mapper.process(&state);
 
-        let mut outputs = Vec::new();
-        for _ in 0..4 {
+        let mut left_ticked = false;
+        for _ in 0..2 {
             state.left_pad.position[0] += 2000.0 / 32767.0;
-            outputs = mapper.process(&state);
+            state.imu_timestamp_us += 30_000;
+            let outputs = mapper.process(&state);
+            left_ticked |= outputs.contains(&Output::TrackpadHaptic {
+                pad: Trackpad::Left,
+            });
+            assert!(!outputs.contains(&Output::TrackpadHaptic {
+                pad: Trackpad::Right,
+            }));
         }
-        assert!(outputs.contains(&Output::TrackpadHaptic {
-            pad: Trackpad::Left
-        }));
-        assert!(!outputs.contains(&Output::TrackpadHaptic {
-            pad: Trackpad::Right
-        }));
+        assert!(left_ticked);
 
-        for _ in 0..4 {
+        let mut right_ticked = false;
+        for _ in 0..2 {
             state.right_pad.position[1] += 2000.0 / 32767.0;
-            outputs = mapper.process(&state);
+            state.imu_timestamp_us += 30_000;
+            let outputs = mapper.process(&state);
+            assert!(!outputs.contains(&Output::TrackpadHaptic {
+                pad: Trackpad::Left,
+            }));
+            right_ticked |= outputs.contains(&Output::TrackpadHaptic {
+                pad: Trackpad::Right,
+            });
         }
-        assert!(!outputs.contains(&Output::TrackpadHaptic {
-            pad: Trackpad::Left
-        }));
-        assert!(outputs.contains(&Output::TrackpadHaptic {
-            pad: Trackpad::Right
-        }));
+        assert!(right_ticked);
     }
 
     #[test]
@@ -1322,23 +1484,24 @@ mod tests {
         let mut state = ControllerState::default();
         state.right_pad.touched = true;
         mapper.process(&state);
-        for _ in 0..3 {
-            state.right_pad.position[0] += 2000.0 / 32767.0;
-            assert!(!mapper.process(&state).contains(&Output::TrackpadHaptic {
-                pad: Trackpad::Right
-            }));
-        }
+        state.right_pad.position[0] += 2000.0 / 32767.0;
+        state.imu_timestamp_us = 30_000;
+        assert!(!mapper.process(&state).contains(&Output::TrackpadHaptic {
+            pad: Trackpad::Right,
+        }));
 
         state.right_pad.touched = false;
         mapper.process(&state);
         state.right_pad.touched = true;
         state.right_pad.position[0] = -0.5;
+        state.imu_timestamp_us = 60_000;
         assert!(!mapper.process(&state).contains(&Output::TrackpadHaptic {
-            pad: Trackpad::Right
+            pad: Trackpad::Right,
         }));
-        state.right_pad.position[0] += 1000.0 / 32767.0;
+        state.right_pad.position[0] += 1700.0 / 32767.0;
+        state.imu_timestamp_us = 90_000;
         assert!(!mapper.process(&state).contains(&Output::TrackpadHaptic {
-            pad: Trackpad::Right
+            pad: Trackpad::Right,
         }));
 
         let config = Config::parse(
@@ -1350,16 +1513,19 @@ mod tests {
         )
         .unwrap();
         let mut mapper = Mapper::new(config).unwrap();
-        state.right_pad.position = [0.0, 0.0];
+        state = ControllerState::default();
+        state.right_pad.touched = true;
         mapper.process(&state);
-        let mut output = false;
-        for _ in 0..4 {
-            state.right_pad.position[0] += 2000.0 / 32767.0;
-            output |= mapper.process(&state).contains(&Output::TrackpadHaptic {
-                pad: Trackpad::Right,
-            });
-        }
-        assert!(output);
+        state.right_pad.position[0] += 1700.0 / 32767.0;
+        state.imu_timestamp_us = 30_000;
+        assert!(!mapper.process(&state).contains(&Output::TrackpadHaptic {
+            pad: Trackpad::Right,
+        }));
+        state.right_pad.position[0] += 1700.0 / 32767.0;
+        state.imu_timestamp_us = 60_000;
+        assert!(mapper.process(&state).contains(&Output::TrackpadHaptic {
+            pad: Trackpad::Right,
+        }));
     }
 
     #[test]
