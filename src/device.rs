@@ -1,7 +1,7 @@
 use crate::protocol::{
     ControllerState, PROTEUS_PRODUCT_ID, Report, Trackpad, VALVE_VENDOR_ID, imu_mode_report,
-    lizard_mode_report, parse_report, rumble_report, trackpad_click_pressure_report,
-    trackpad_haptic_report,
+    lizard_mode_report, mode_switch_haptic_report, parse_report, rumble_report,
+    trackpad_click_pressure_report, trackpad_haptic_report,
 };
 use hidapi::{HidApi, HidDevice};
 use std::ffi::CString;
@@ -176,6 +176,16 @@ impl DeviceManager {
             self.slots[active]
                 .device
                 .write(&trackpad_haptic_report(trackpad))
+                .whence()?;
+        }
+        Ok(())
+    }
+
+    pub fn mode_switch_haptic(&self) -> Result<()> {
+        if let Some(active) = self.active {
+            self.slots[active]
+                .device
+                .write(&mode_switch_haptic_report())
                 .whence()?;
         }
         Ok(())

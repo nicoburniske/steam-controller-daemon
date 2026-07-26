@@ -47,6 +47,16 @@ pub fn trackpad_haptic_report(trackpad: Trackpad) -> [u8; 4] {
     [0x82, trackpad as u8, 1, (-15_i8) as u8]
 }
 
+pub fn mode_switch_haptic_report() -> [u8; 8] {
+    let mut report = [0; 8];
+    report[0] = 0x81;
+    report[1] = 2;
+    report[2..4].copy_from_slice(&625_u16.to_le_bytes());
+    report[4..6].copy_from_slice(&625_u16.to_le_bytes());
+    report[6..8].copy_from_slice(&48_u16.to_le_bytes());
+    report
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Report {
     State(ControllerState),
@@ -413,5 +423,9 @@ mod tests {
         );
         assert_eq!(trackpad_haptic_report(Trackpad::Left), [0x82, 0, 1, 0xf1]);
         assert_eq!(trackpad_haptic_report(Trackpad::Right), [0x82, 1, 1, 0xf1]);
+        assert_eq!(
+            mode_switch_haptic_report(),
+            [0x81, 2, 0x71, 2, 0x71, 2, 48, 0]
+        );
     }
 }
