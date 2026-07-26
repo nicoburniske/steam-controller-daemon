@@ -181,19 +181,37 @@ impl DeviceManager {
 
     pub fn play_haptic(&self, sound: HapticSound) -> Result<()> {
         self.write_haptic(match sound {
-            HapticSound::ControllerOn => Haptic::Script { script: 1, gain: 0 },
-            HapticSound::ControllerOff => Haptic::Script { script: 5, gain: 0 },
-            HapticSound::UpFive => Haptic::Script { script: 6, gain: 0 },
-            HapticSound::DownFive => Haptic::Script { script: 7, gain: 0 },
-            HapticSound::UpSix => Haptic::Script { script: 8, gain: 0 },
-            HapticSound::DownSix => Haptic::Script { script: 9, gain: 0 },
+            HapticSound::ControllerOn => Haptic::Script {
+                script: 1,
+                gain: -10,
+            },
+            HapticSound::ControllerOff => Haptic::Script {
+                script: 5,
+                gain: -10,
+            },
+            HapticSound::UpFive => Haptic::Script {
+                script: 6,
+                gain: -10,
+            },
+            HapticSound::DownFive => Haptic::Script {
+                script: 7,
+                gain: -10,
+            },
+            HapticSound::UpSix => Haptic::Script {
+                script: 8,
+                gain: -10,
+            },
+            HapticSound::DownSix => Haptic::Script {
+                script: 9,
+                gain: -10,
+            },
             HapticSound::WhoopUpThree => Haptic::Script {
                 script: 10,
-                gain: 0,
+                gain: -10,
             },
             HapticSound::WhoopDown => Haptic::Script {
                 script: 11,
-                gain: 0,
+                gain: -10,
             },
             HapticSound::Pulse => Haptic::Pulse {
                 on_us: 625,
@@ -222,8 +240,14 @@ impl DeviceManager {
                 start_frequency: 900,
                 end_frequency: 400,
             },
-            HapticSound::TrillUp => Haptic::Script { script: 3, gain: 0 },
-            HapticSound::TrillDown => Haptic::Script { script: 4, gain: 0 },
+            HapticSound::TrillUp => Haptic::Script {
+                script: 3,
+                gain: -10,
+            },
+            HapticSound::TrillDown => Haptic::Script {
+                script: 4,
+                gain: -10,
+            },
         })
     }
 
