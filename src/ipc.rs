@@ -7,7 +7,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, SyncSender};
 use std::thread;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, watch};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Status {
@@ -23,17 +23,61 @@ pub struct NamedEvent {
     pub name: String,
 }
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
+pub struct OskState {
+    pub visible: bool,
+    pub left: OskPad,
+    pub right: OskPad,
+    session: u64,
+    click_sequence: u64,
+    click_history_len: u8,
+    click_history: [OskClick; OSK_CLICK_HISTORY_LEN],
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
+pub struct OskPad {
+    pub touched: bool,
+    pub pressed: bool,
+    pub position: [f32; 2],
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
+pub struct OskClick {
+    pub sequence: u64,
+    pub pad: OskPadSide,
+    pub position: [f32; 2],
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum OskPadSide {
+    #[default]
+    Left,
+    Right,
+}
+
+pub struct OskClicks<'a> {
+    state: &'a OskState,
+    sequence: u64,
+    remaining: u8,
+    missed: u64,
+}
+
+const OSK_CLICK_HISTORY_LEN: usize = 16;
+
 pub struct Server {
     path: PathBuf,
 }
 
 pub type EventPublisher = broadcast::Sender<NamedEvent>;
+pub type OskPublisher = watch::Sender<OskState>;
 
 pub struct ControlCommand {
     pub request: Request,
     pub reply: SyncSender<Response>,
 }
 
+#[derive(Clone)]
 pub struct Client {
     path: PathBuf,
 }
@@ -42,15 +86,27 @@ pub struct EventStream {
     lines: std::io::Lines<BufReader<UnixStream>>,
 }
 
+pub struct OskStream {
+    lines: std::io::Lines<BufReader<UnixStream>>,
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "command", rename_all = "kebab-case")]
 pub enum Request {
     Status,
     Mode,
-    ModeSet { name: String },
+    ModeSet {
+        name: String,
+    },
     ModeNext,
     Reload,
     Events,
+    Osk,
+    Key {
+        code: u16,
+        shift: bool,
+        session: u64,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -63,11 +119,98 @@ pub enum Response {
     Error { message: String },
 }
 
+impl OskState {
+    pub fn set_visible(&mut self, visible: bool) {
+        if visible && !self.visible {
+            self.session = self.session.wrapping_add(1);
+            if self.session == 0 {
+                self.session = 1;
+            }
+            self.click_history_len = 0;
+        }
+        self.visible = visible;
+        self.left.touched = false;
+        self.left.pressed = false;
+        self.right.touched = false;
+        self.right.pressed = false;
+    }
+
+    pub fn session(&self) -> u64 {
+        self.session
+    }
+
+    pub fn update_pad(&mut self, side: OskPadSide, pad: OskPad, record_rising_edge: bool) {
+        let clicked = {
+            let previous = match side {
+                OskPadSide::Left => &mut self.left,
+                OskPadSide::Right => &mut self.right,
+            };
+            let clicked = record_rising_edge && pad.pressed && !previous.pressed;
+            *previous = pad;
+            clicked
+        };
+        if clicked {
+            self.record_click(side, pad.position);
+        }
+    }
+
+    pub fn record_click(&mut self, pad: OskPadSide, position: [f32; 2]) {
+        let sequence = self.click_sequence;
+        self.click_history[sequence as usize % OSK_CLICK_HISTORY_LEN] = OskClick {
+            sequence,
+            pad,
+            position,
+        };
+        self.click_sequence = sequence.wrapping_add(1);
+        self.click_history_len = self
+            .click_history_len
+            .saturating_add(1)
+            .min(OSK_CLICK_HISTORY_LEN as u8);
+    }
+
+    pub fn click_cursor(&self) -> u64 {
+        self.click_sequence
+    }
+
+    pub fn clicks_since(&self, cursor: u64) -> OskClicks<'_> {
+        let available = u64::from(self.click_history_len.min(OSK_CLICK_HISTORY_LEN as u8));
+        let requested = self.click_sequence.wrapping_sub(cursor);
+        let missed = requested.saturating_sub(available);
+        OskClicks {
+            state: self,
+            sequence: cursor.wrapping_add(missed),
+            remaining: requested.min(available) as u8,
+            missed,
+        }
+    }
+}
+
+impl OskClicks<'_> {
+    pub fn missed(&self) -> u64 {
+        self.missed
+    }
+}
+
+impl Iterator for OskClicks<'_> {
+    type Item = OskClick;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.remaining == 0 {
+            return None;
+        }
+        let click = self.state.click_history[self.sequence as usize % OSK_CLICK_HISTORY_LEN];
+        debug_assert_eq!(click.sequence, self.sequence);
+        self.sequence = self.sequence.wrapping_add(1);
+        self.remaining -= 1;
+        Some(click)
+    }
+}
+
 impl Server {
     pub fn bind(
         path: impl AsRef<Path>,
         commands: SyncSender<ControlCommand>,
-    ) -> Result<(Self, EventPublisher)> {
+    ) -> Result<(Self, EventPublisher, OskPublisher)> {
         let path = path.as_ref().to_path_buf();
         match fs::remove_file(&path) {
             Ok(()) => {}
@@ -79,6 +222,8 @@ impl Server {
         fs::set_permissions(&path, fs::Permissions::from_mode(0o660)).whence()?;
         let (events, _) = broadcast::channel(32);
         let publisher = events.clone();
+        let (osk, _) = watch::channel(OskState::default());
+        let osk_publisher = osk.clone();
         thread::Builder::new()
             .name("scd-ipc".into())
             .spawn(move || {
@@ -88,9 +233,10 @@ impl Server {
                     };
                     let commands = commands.clone();
                     let events = events.clone();
+                    let osk = osk.clone();
                     if let Err(error) = thread::Builder::new()
                         .name("scd-client".into())
-                        .spawn(move || handle_client(stream, commands, events))
+                        .spawn(move || handle_client(stream, commands, events, osk))
                     {
                         log::warn!("could not serve control client: {error}");
                     }
@@ -98,7 +244,7 @@ impl Server {
             })
             .whence()?;
 
-        Ok((Self { path }, publisher))
+        Ok((Self { path }, publisher, osk_publisher))
     }
 }
 
@@ -159,6 +305,26 @@ impl Client {
         })
     }
 
+    pub fn osk(&self) -> Result<OskStream> {
+        let stream = UnixStream::connect(&self.path).whence()?;
+        serde_json::to_writer(&stream, &Request::Osk).whence()?;
+        (&stream).write_all(b"\n").whence()?;
+        Ok(OskStream {
+            lines: BufReader::new(stream).lines(),
+        })
+    }
+
+    pub fn key(&self, code: u16, shift: bool, session: u64) -> Result<()> {
+        match self.request(Request::Key {
+            code,
+            shift,
+            session,
+        })? {
+            Response::Done => Ok(()),
+            _ => Err(Error::message("unexpected daemon response")),
+        }
+    }
+
     fn request(&self, request: Request) -> Result<Response> {
         let stream = UnixStream::connect(&self.path).whence()?;
         serde_json::to_writer(&stream, &request).whence()?;
@@ -188,7 +354,23 @@ impl Iterator for EventStream {
     }
 }
 
-fn handle_client(stream: UnixStream, commands: SyncSender<ControlCommand>, events: EventPublisher) {
+impl Iterator for OskStream {
+    type Item = Result<OskState>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.lines.next().map(|line| {
+            let line = line.whence()?;
+            serde_json::from_str(&line).whence()
+        })
+    }
+}
+
+fn handle_client(
+    stream: UnixStream,
+    commands: SyncSender<ControlCommand>,
+    events: EventPublisher,
+    osk: OskPublisher,
+) {
     let mut request = String::new();
     if BufReader::new(&stream).read_line(&mut request).is_err() {
         return;
@@ -226,6 +408,28 @@ fn handle_client(stream: UnixStream, commands: SyncSender<ControlCommand>, event
         return;
     }
 
+    if matches!(request, Request::Osk) {
+        let mut receiver = osk.subscribe();
+        drop(osk);
+        let Ok(runtime) = tokio::runtime::Builder::new_current_thread().build() else {
+            return;
+        };
+        let mut writer = BufWriter::new(stream);
+        loop {
+            let state = *receiver.borrow_and_update();
+            if serde_json::to_writer(&mut writer, &state).is_err()
+                || writer.write_all(b"\n").is_err()
+                || writer.flush().is_err()
+            {
+                break;
+            }
+            if runtime.block_on(receiver.changed()).is_err() {
+                break;
+            }
+        }
+        return;
+    }
+
     let (reply, receiver) = mpsc::sync_channel(1);
     if commands.send(ControlCommand { request, reply }).is_err() {
         return;
@@ -237,4 +441,71 @@ fn handle_client(stream: UnixStream, commands: SyncSender<ControlCommand>, event
     let _ = serde_json::to_writer(&mut writer, &response);
     let _ = writer.write_all(b"\n");
     let _ = writer.flush();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn click_history_wraps_in_order() {
+        let mut state = OskState {
+            click_sequence: u64::MAX - 1,
+            ..Default::default()
+        };
+        state.record_click(OskPadSide::Left, [1.0, 0.0]);
+        state.record_click(OskPadSide::Right, [2.0, 0.0]);
+        state.record_click(OskPadSide::Left, [3.0, 0.0]);
+
+        let mut clicks = state.clicks_since(u64::MAX - 1);
+        assert_eq!(clicks.missed(), 0);
+        assert_eq!(
+            clicks.next().map(|click| click.sequence),
+            Some(u64::MAX - 1)
+        );
+        assert_eq!(clicks.next().map(|click| click.sequence), Some(u64::MAX));
+        assert_eq!(clicks.next().map(|click| click.sequence), Some(0));
+        assert_eq!(clicks.next(), None);
+        assert_eq!(state.click_cursor(), 1);
+    }
+
+    #[test]
+    fn held_pad_is_seeded_before_clicks_are_recorded() {
+        let mut state = OskState::default();
+        state.update_pad(
+            OskPadSide::Left,
+            OskPad {
+                touched: true,
+                pressed: true,
+                position: [-0.5, 0.25],
+            },
+            false,
+        );
+        assert!(state.left.pressed);
+        assert_eq!(state.click_cursor(), 0);
+
+        state.update_pad(
+            OskPadSide::Left,
+            OskPad {
+                touched: true,
+                pressed: false,
+                position: [-0.5, 0.25],
+            },
+            true,
+        );
+        state.update_pad(
+            OskPadSide::Left,
+            OskPad {
+                touched: true,
+                pressed: true,
+                position: [0.5, -0.25],
+            },
+            true,
+        );
+
+        let click = state.clicks_since(0).next().unwrap();
+        assert_eq!(click.pad, OskPadSide::Left);
+        assert_eq!(click.position, [0.5, -0.25]);
+        assert_eq!(state.click_cursor(), 1);
+    }
 }

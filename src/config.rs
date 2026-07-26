@@ -72,7 +72,7 @@ impl Config {
                     "invalid configuration: global binding {index} duplicates an earlier chord"
                 )));
             }
-            self.validate_action(&binding.action)?;
+            self.validate_action(&binding.action, true)?;
         }
 
         for (name, mode) in &self.modes {
@@ -92,7 +92,7 @@ impl Config {
                         binding.input
                     )));
                 }
-                self.validate_action(&binding.action)?;
+                self.validate_action(&binding.action, false)?;
             }
 
             for (layer_index, (layer_name, layer)) in mode.layers.iter().enumerate() {
@@ -135,7 +135,7 @@ impl Config {
                             binding.input
                         )));
                     }
-                    self.validate_action(&binding.action)?;
+                    self.validate_action(&binding.action, false)?;
                 }
             }
 
@@ -210,13 +210,16 @@ impl Config {
         Ok(())
     }
 
-    fn validate_action(&self, action: &Action) -> ScdResult<()> {
+    fn validate_action(&self, action: &Action, global: bool) -> ScdResult<()> {
         match action {
             Action::ModeSet { name } if !self.modes.contains_key(name) => Err(Error::message(
                 format!("invalid configuration: mode-set target {name:?} is not configured"),
             )),
             Action::Event { name } if name.trim().is_empty() => Err(Error::message(
                 "invalid configuration: event name must not be empty",
+            )),
+            Action::KeyboardToggle if !global => Err(Error::message(
+                "invalid configuration: keyboard-toggle is only valid for global bindings",
             )),
             _ => Ok(()),
         }
@@ -280,6 +283,7 @@ pub enum Action {
         name: String,
     },
     ModeNext,
+    KeyboardToggle,
     Event {
         name: String,
     },
@@ -321,15 +325,21 @@ where
                 .map_err(|_| serde::de::Error::custom(format!("unknown key {name:?}")))?
         }
     };
-    if key == KeyCode::KEY_RESERVED
-        || (0x100..=0x15f).contains(&key.code())
-        || (0x2c0..=0x2ff).contains(&key.code())
-    {
+    if !is_keyboard_key(key) {
         return Err(serde::de::Error::custom(format!(
             "{name:?} is not a keyboard key"
         )));
     }
     Ok(key)
+}
+
+pub const fn is_keyboard_key(key: KeyCode) -> bool {
+    let code = key.code();
+    code != 0
+        && code <= 0x2ff
+        && !(code >= 0x100 && code <= 0x15f)
+        && !(code >= 0x220 && code <= 0x22f)
+        && !(code >= 0x2c0 && code <= 0x2ff)
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq)]
@@ -513,6 +523,15 @@ mod tests {
                 "#,
                 "mode-set target",
             ),
+            (
+                r#"
+                    [modes.one]
+                    [[modes.one.bindings]]
+                    input = "a"
+                    action = { type = "keyboard-toggle" }
+                "#,
+                "only valid for global bindings",
+            ),
         ] {
             let source = format!("version = 1\ndefault_mode = \"one\"\n{body}");
             assert!(
@@ -559,7 +578,12 @@ mod tests {
 
     #[test]
     fn rejects_non_keyboard_key_codes() {
-        for code in ["KEY_RESERVED", "BTN_LEFT", "BTN_TRIGGER_HAPPY1"] {
+        for code in [
+            "KEY_RESERVED",
+            "BTN_LEFT",
+            "BTN_DPAD_UP",
+            "BTN_TRIGGER_HAPPY1",
+        ] {
             let source = format!(
                 r#"
                     version = 1

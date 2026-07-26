@@ -1,9 +1,13 @@
 use crate::Result;
-use crate::config::Config;
+use crate::config::{Config, is_keyboard_key};
 use crate::device::{DeviceEvent, DeviceManager};
-use crate::ipc::{EventPublisher, NamedEvent, Request, Response, Server, Status};
+use crate::ipc::{
+    EventPublisher, NamedEvent, OskPadSide, OskPublisher, OskState, Request, Response, Server,
+    Status,
+};
 use crate::mapper::{Mapper, Output};
 use crate::output::Outputs;
+use evdev::KeyCode;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::thread;
@@ -29,7 +33,9 @@ impl Daemon {
         let mut outputs = Outputs::new()?;
         let mut device = DeviceManager::new()?;
         let (command_sender, commands) = mpsc::sync_channel(32);
-        let (_server, events) = Server::bind(&self.socket_path, command_sender)?;
+        let (_server, events, osk) = Server::bind(&self.socket_path, command_sender)?;
+        let mut keyboard = OskState::default();
+        let mut keyboard_closed_at: Option<Instant> = None;
         let mut battery = None;
         let mut charging = None;
         let mut last_lizard_refresh = Instant::now() - Duration::from_secs(4);
@@ -54,7 +60,15 @@ impl Daemon {
                     },
                     Request::ModeSet { name } => match mapper.set_mode(&name, &mut mapped) {
                         Ok(()) => {
-                            Self::emit(&mut mapped, &mut outputs, &events, &device)?;
+                            Self::emit(
+                                &mut mapped,
+                                &mut mapper,
+                                &mut outputs,
+                                &events,
+                                &device,
+                                &mut keyboard,
+                                &osk,
+                            )?;
                             Response::Done
                         }
                         Err(error) => Response::Error {
@@ -63,13 +77,29 @@ impl Daemon {
                     },
                     Request::ModeNext => {
                         mapper.next_mode(&mut mapped);
-                        Self::emit(&mut mapped, &mut outputs, &events, &device)?;
+                        Self::emit(
+                            &mut mapped,
+                            &mut mapper,
+                            &mut outputs,
+                            &events,
+                            &device,
+                            &mut keyboard,
+                            &osk,
+                        )?;
                         Response::Done
                     }
                     Request::Reload => match Config::load(&self.config_path) {
                         Ok(config) => match mapper.reload(config, &mut mapped) {
                             Ok(()) => {
-                                Self::emit(&mut mapped, &mut outputs, &events, &device)?;
+                                Self::emit(
+                                    &mut mapped,
+                                    &mut mapper,
+                                    &mut outputs,
+                                    &events,
+                                    &device,
+                                    &mut keyboard,
+                                    &osk,
+                                )?;
                                 Response::Done
                             }
                             Err(error) => Response::Error {
@@ -80,7 +110,31 @@ impl Daemon {
                             message: error.to_string(),
                         },
                     },
-                    Request::Events => unreachable!(),
+                    Request::Key {
+                        code,
+                        shift,
+                        session,
+                    } => {
+                        if session == 0
+                            || session != keyboard.session()
+                            || (!keyboard.visible
+                                && !keyboard_closed_at.is_some_and(|closed| {
+                                    closed.elapsed() < Duration::from_secs(1)
+                                }))
+                        {
+                            Response::Error {
+                                message: "keyboard session is no longer active".into(),
+                            }
+                        } else if !is_keyboard_key(KeyCode::new(code)) {
+                            Response::Error {
+                                message: format!("invalid keyboard code {code}"),
+                            }
+                        } else {
+                            outputs.key(KeyCode::new(code), shift)?;
+                            Response::Done
+                        }
+                    }
+                    Request::Events | Request::Osk => unreachable!(),
                 };
                 let _ = command.reply.send(response);
             }
@@ -90,8 +144,47 @@ impl Daemon {
                 received = true;
                 match event {
                     DeviceEvent::State(state) => {
-                        mapper.process(&state, &mut mapped);
-                        Self::emit(&mut mapped, &mut outputs, &events, &device)?;
+                        let was_visible = keyboard.visible;
+                        mapper.process(&state, keyboard.visible, &mut mapped);
+                        Self::emit(
+                            &mut mapped,
+                            &mut mapper,
+                            &mut outputs,
+                            &events,
+                            &device,
+                            &mut keyboard,
+                            &osk,
+                        )?;
+                        match (was_visible, keyboard.visible) {
+                            (true, false) => keyboard_closed_at = Some(Instant::now()),
+                            (false, true) => keyboard_closed_at = None,
+                            _ => {}
+                        }
+                        if keyboard.visible {
+                            for (side, source) in [
+                                (OskPadSide::Left, state.left_pad),
+                                (OskPadSide::Right, state.right_pad),
+                            ] {
+                                keyboard.update_pad(
+                                    side,
+                                    crate::ipc::OskPad {
+                                        touched: source.touched,
+                                        pressed: source.clicked,
+                                        position: source.position,
+                                    },
+                                    was_visible,
+                                );
+                            }
+                            let next = keyboard;
+                            osk.send_if_modified(|state| {
+                                if *state == next {
+                                    false
+                                } else {
+                                    *state = next;
+                                    true
+                                }
+                            });
+                        }
                     }
                     DeviceEvent::Battery {
                         percent,
@@ -102,7 +195,18 @@ impl Daemon {
                     }
                     DeviceEvent::Disconnected => {
                         mapper.release_all(&mut mapped);
-                        Self::emit(&mut mapped, &mut outputs, &events, &device)?;
+                        Self::emit(
+                            &mut mapped,
+                            &mut mapper,
+                            &mut outputs,
+                            &events,
+                            &device,
+                            &mut keyboard,
+                            &osk,
+                        )?;
+                        keyboard.set_visible(false);
+                        keyboard_closed_at = None;
+                        osk.send_replace(keyboard);
                         battery = None;
                         charging = None;
                         log::info!("controller disconnected");
@@ -130,10 +234,24 @@ impl Daemon {
 
     fn emit(
         mapped: &mut Vec<Output>,
+        mapper: &mut Mapper,
         outputs: &mut Outputs,
         events: &EventPublisher,
         device: &DeviceManager,
+        keyboard: &mut OskState,
+        osk: &OskPublisher,
     ) -> Result<()> {
+        if mapped
+            .iter()
+            .any(|output| matches!(output, Output::KeyboardToggle))
+        {
+            mapped.retain(|output| !matches!(output, Output::KeyboardToggle));
+            if !keyboard.visible {
+                mapper.suspend(mapped);
+            }
+            keyboard.set_visible(!keyboard.visible);
+            osk.send_replace(*keyboard);
+        }
         for output in mapped.drain(..) {
             match output {
                 Output::Event { name } => {

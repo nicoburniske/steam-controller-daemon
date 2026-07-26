@@ -66,6 +66,7 @@ pub enum Output {
     TrackpadHaptic {
         pad: Trackpad,
     },
+    KeyboardToggle,
     Event {
         name: String,
     },
@@ -114,7 +115,12 @@ impl Mapper {
             .0
     }
 
-    pub fn process(&mut self, state: &ControllerState, outputs: &mut Vec<Output>) {
+    pub fn process(
+        &mut self,
+        state: &ControllerState,
+        keyboard_visible: bool,
+        outputs: &mut Vec<Output>,
+    ) {
         let mut mode_changed = false;
 
         for index in 0..self.config.global.bindings.len() {
@@ -165,7 +171,7 @@ impl Mapper {
             }
         }
 
-        if !mode_changed {
+        if !keyboard_visible && !mode_changed {
             self.quarantined.remove_inactive(state.buttons);
 
             let mut index = self.routes.len();
@@ -222,7 +228,7 @@ impl Mapper {
             }
         }
 
-        if !mode_changed {
+        if !keyboard_visible && !mode_changed {
             let layer_count = self.mode().layers.len();
             for layer_index in 0..layer_count {
                 let hold = self
@@ -285,7 +291,7 @@ impl Mapper {
             }
         }
 
-        if !mode_changed {
+        if !keyboard_visible && !mode_changed {
             let mapping_count = self.mode().axes.len();
             for index in 0..mapping_count {
                 let mapping = self.mode().axes[index];
@@ -318,7 +324,9 @@ impl Mapper {
                     _ => unreachable!("configuration validation rejects mismatched analog shapes"),
                 }
             }
+        }
 
+        if !mode_changed {
             let timestamp_us = state
                 .trackpad_timestamp_us
                 .unwrap_or(state.imu_timestamp_us);
@@ -387,6 +395,10 @@ impl Mapper {
         self.previous = None;
     }
 
+    pub fn suspend(&mut self, outputs: &mut Vec<Output>) {
+        self.release_outputs(outputs);
+    }
+
     fn mode(&self) -> &crate::config::Mode {
         self.config
             .modes
@@ -436,10 +448,17 @@ impl Mapper {
                     return true;
                 }
             }
+            Action::KeyboardToggle if active => {
+                outputs.push(Output::KeyboardToggle);
+                return true;
+            }
             Action::Event { name } if active => {
                 outputs.push(Output::Event { name: name.clone() });
             }
-            Action::ModeSet { .. } | Action::ModeNext | Action::Event { .. } => {}
+            Action::ModeSet { .. }
+            | Action::ModeNext
+            | Action::KeyboardToggle
+            | Action::Event { .. } => {}
         }
         false
     }
@@ -829,7 +848,7 @@ mod tests {
                 default_mode = "desktop"
                 [[global.bindings]]
                 chord = ["steam", "x"]
-                action = { type = "event", name = "keyboard.toggle" }
+                action = { type = "keyboard-toggle" }
                 [modes.desktop]
                 [[modes.desktop.bindings]]
                 input = "steam"
@@ -847,12 +866,7 @@ mod tests {
             []
         );
         let chord = state_with(&[ProtocolButton::Steam, ProtocolButton::X]);
-        assert_eq!(
-            mapped(&mut mapper, &chord),
-            [Output::Event {
-                name: "keyboard.toggle".to_owned()
-            }]
-        );
+        assert_eq!(mapped(&mut mapper, &chord), [Output::KeyboardToggle]);
         assert_eq!(mapped(&mut mapper, &chord), []);
         assert_eq!(mapped(&mut mapper, &state_with(&[ProtocolButton::X])), []);
         assert_eq!(mapped(&mut mapper, &ControllerState::default()), []);
@@ -878,7 +892,165 @@ mod tests {
                 &state_with(&[ProtocolButton::X, ProtocolButton::Steam])
             )
             .iter()
-            .any(|output| matches!(output, Output::Event { .. }))
+            .any(|output| matches!(output, Output::KeyboardToggle))
+        );
+    }
+
+    #[test]
+    fn visible_keyboard_suppresses_mode_outputs_but_keeps_global_toggle() {
+        let config = Config::parse(
+            r#"
+                version = 1
+                default_mode = "desktop"
+                [[global.bindings]]
+                chord = ["steam", "x"]
+                action = { type = "keyboard-toggle" }
+                [modes.desktop]
+                [[modes.desktop.bindings]]
+                input = "a"
+                action = { type = "key", key = "enter" }
+                [[modes.desktop.axes]]
+                source = "right-pad"
+                target = "mouse-motion"
+                sensitivity = 100.0
+            "#,
+        )
+        .unwrap();
+        let mut mapper = Mapper::new(config);
+
+        assert_eq!(
+            mapped(&mut mapper, &state_with(&[ProtocolButton::Steam])),
+            []
+        );
+        assert_eq!(
+            mapped(
+                &mut mapper,
+                &state_with(&[ProtocolButton::Steam, ProtocolButton::X])
+            ),
+            [Output::KeyboardToggle]
+        );
+
+        let mut state = state_with(&[ProtocolButton::A]);
+        state.right_pad.touched = true;
+        state.right_pad.position = [0.1, 0.0];
+        assert_eq!(keyboard_mapped(&mut mapper, &state), []);
+        state.right_pad.position = [0.11, 0.0];
+        assert_eq!(keyboard_mapped(&mut mapper, &state), []);
+        assert_eq!(
+            keyboard_mapped(&mut mapper, &state_with(&[ProtocolButton::Steam])),
+            []
+        );
+        assert_eq!(
+            keyboard_mapped(
+                &mut mapper,
+                &state_with(&[ProtocolButton::Steam, ProtocolButton::X])
+            ),
+            [Output::KeyboardToggle]
+        );
+    }
+
+    #[test]
+    fn keyboard_capture_does_not_repress_held_desktop_controls() {
+        let config = Config::parse(
+            r#"
+                version = 1
+                default_mode = "desktop"
+                [[global.bindings]]
+                chord = ["steam", "x"]
+                action = { type = "keyboard-toggle" }
+                [modes.desktop]
+                [[modes.desktop.bindings]]
+                input = "l4"
+                action = { type = "key", key = "super" }
+                [[modes.desktop.bindings]]
+                input = "a"
+                action = { type = "key", key = "enter" }
+                [[modes.desktop.bindings]]
+                input = "left-pad-click"
+                action = { type = "mouse", button = "left" }
+            "#,
+        )
+        .unwrap();
+        let mut mapper = Mapper::new(config);
+        let held = [
+            ProtocolButton::L4,
+            ProtocolButton::A,
+            ProtocolButton::LeftPadClick,
+        ];
+
+        assert_eq!(
+            mapped(&mut mapper, &state_with(&held)),
+            [
+                Output::Key {
+                    key: KeyCode::KEY_LEFTMETA,
+                    pressed: true,
+                },
+                Output::Key {
+                    key: KeyCode::KEY_ENTER,
+                    pressed: true,
+                },
+                Output::MouseButton {
+                    button: MouseButton::Left,
+                    pressed: true,
+                },
+            ]
+        );
+
+        let mut with_steam = held.to_vec();
+        with_steam.push(ProtocolButton::Steam);
+        assert_eq!(mapped(&mut mapper, &state_with(&with_steam)), []);
+        let mut with_toggle = with_steam.clone();
+        with_toggle.push(ProtocolButton::X);
+        assert_eq!(
+            mapped(&mut mapper, &state_with(&with_toggle)),
+            [Output::KeyboardToggle]
+        );
+
+        let mut outputs = Vec::new();
+        mapper.suspend(&mut outputs);
+        assert_eq!(
+            outputs,
+            [
+                Output::MouseButton {
+                    button: MouseButton::Left,
+                    pressed: false,
+                },
+                Output::Key {
+                    key: KeyCode::KEY_ENTER,
+                    pressed: false,
+                },
+                Output::Key {
+                    key: KeyCode::KEY_LEFTMETA,
+                    pressed: false,
+                },
+            ]
+        );
+
+        assert_eq!(keyboard_mapped(&mut mapper, &state_with(&held)), []);
+        assert_eq!(keyboard_mapped(&mut mapper, &state_with(&with_steam)), []);
+        assert_eq!(
+            keyboard_mapped(&mut mapper, &state_with(&with_toggle)),
+            [Output::KeyboardToggle]
+        );
+        assert_eq!(mapped(&mut mapper, &state_with(&with_toggle)), []);
+        assert_eq!(mapped(&mut mapper, &state_with(&held)), []);
+        assert_eq!(mapped(&mut mapper, &ControllerState::default()), []);
+        assert_eq!(
+            mapped(&mut mapper, &state_with(&held)),
+            [
+                Output::Key {
+                    key: KeyCode::KEY_LEFTMETA,
+                    pressed: true,
+                },
+                Output::Key {
+                    key: KeyCode::KEY_ENTER,
+                    pressed: true,
+                },
+                Output::MouseButton {
+                    button: MouseButton::Left,
+                    pressed: true,
+                },
+            ]
         );
     }
 
@@ -1365,7 +1537,13 @@ mod tests {
 
     fn mapped(mapper: &mut Mapper, state: &ControllerState) -> Vec<Output> {
         let mut outputs = Vec::new();
-        mapper.process(state, &mut outputs);
+        mapper.process(state, false, &mut outputs);
+        outputs
+    }
+
+    fn keyboard_mapped(mapper: &mut Mapper, state: &ControllerState) -> Vec<Output> {
+        let mut outputs = Vec::new();
+        mapper.process(state, true, &mut outputs);
         outputs
     }
 

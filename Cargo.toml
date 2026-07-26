@@ -5,6 +5,8 @@ edition = "2024"
 rust-version = "1.85"
 
 [dependencies]
+blit = { git = "https://github.com/nicoburniske/blit", rev = "a0eba1db8d68eef71de6040bcba36443d62e2983", optional = true }
+blit-cpu = { git = "https://github.com/nicoburniske/blit", rev = "a0eba1db8d68eef71de6040bcba36443d62e2983", optional = true }
 clap = { version = "4.5", features = ["derive"] }
 env_logger = "0.11"
 evdev = "0.13"
@@ -14,8 +16,12 @@ log = "0.4"
 libc = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["sync"] }
+smithay-client-toolkit = { version = "0.21.1", default-features = false, features = ["calloop"], optional = true }
+tokio = { version = "1", features = ["rt", "sync"] }
 toml = { version = "0.9", features = ["preserve_order"] }
+
+[features]
+osk = ["dep:blit", "dep:blit-cpu", "dep:smithay-client-toolkit"]
 
 [lib]
 path = "src/lib.rs"
@@ -27,3 +33,8 @@ path = "src/bin/scd.rs"
 [[bin]]
 name = "scctl"
 path = "src/bin/scctl.rs"
+
+[[bin]]
+name = "scd-osk"
+path = "src/bin/scd-osk/main.rs"
+required-features = ["osk"]

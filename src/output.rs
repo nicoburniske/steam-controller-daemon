@@ -5,7 +5,7 @@ use evdev::{
 };
 use std::os::fd::AsRawFd;
 
-use crate::config::{GamepadButton, MouseButton};
+use crate::config::{GamepadButton, MouseButton, is_keyboard_key};
 use crate::mapper::{GamepadAxis, Output};
 use crate::{Error, Result, ResultExt};
 
@@ -28,8 +28,9 @@ impl Outputs {
     pub fn new() -> Result<Self> {
         let mut keyboard_keys = AttributeSet::<KeyCode>::new();
         for code in 1..=0x2ff {
-            if !(0x100..=0x15f).contains(&code) && !(0x2c0..=0x2ff).contains(&code) {
-                keyboard_keys.insert(KeyCode::new(code));
+            let key = KeyCode::new(code);
+            if is_keyboard_key(key) {
+                keyboard_keys.insert(key);
             }
         }
         let keyboard = VirtualDevice::builder()
@@ -247,9 +248,30 @@ impl Outputs {
                     ])
                     .whence()
             }
-            Output::Event { .. } | Output::ModeChanged { .. } | Output::TrackpadHaptic { .. } => {
-                Ok(())
-            }
+            Output::KeyboardToggle
+            | Output::Event { .. }
+            | Output::ModeChanged { .. }
+            | Output::TrackpadHaptic { .. } => Ok(()),
+        }
+    }
+
+    pub fn key(&mut self, key: KeyCode, shift: bool) -> Result<()> {
+        if shift {
+            self.keyboard
+                .emit(&[
+                    InputEvent::new(EventType::KEY.0, KeyCode::KEY_LEFTSHIFT.code(), 1),
+                    InputEvent::new(EventType::KEY.0, key.code(), 1),
+                    InputEvent::new(EventType::KEY.0, key.code(), 0),
+                    InputEvent::new(EventType::KEY.0, KeyCode::KEY_LEFTSHIFT.code(), 0),
+                ])
+                .whence()
+        } else {
+            self.keyboard
+                .emit(&[
+                    InputEvent::new(EventType::KEY.0, key.code(), 1),
+                    InputEvent::new(EventType::KEY.0, key.code(), 0),
+                ])
+                .whence()
         }
     }
 
