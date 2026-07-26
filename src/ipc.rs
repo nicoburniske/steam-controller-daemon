@@ -282,6 +282,12 @@ impl Iterator for OskClicks<'_> {
 impl Server {
     pub fn bind(path: impl AsRef<Path>) -> Result<(Self, mpsc::Receiver<ControlCommand>)> {
         let path = path.as_ref().to_path_buf();
+        if let Some(parent) = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            fs::create_dir_all(parent).whence()?;
+        }
         match fs::remove_file(&path) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}

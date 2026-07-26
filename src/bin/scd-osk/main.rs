@@ -6,7 +6,7 @@ use clap::Parser;
 use evdev::KeyCode;
 use keyboard::Keyboard;
 use render::KeyboardRenderer;
-use scd::{ControllerButton, Error, OskPad, OskState, Result, ResultExt};
+use scd::{ControllerButton, Error, OskPad, OskState, Result, ResultExt, paths};
 use std::{
     fs,
     io::{BufWriter, Write},
@@ -16,8 +16,11 @@ use std::{
 
 #[derive(Parser)]
 struct Args {
-    #[arg(long, default_value = "/run/scd/control.sock")]
-    socket: PathBuf,
+    #[arg(
+        long,
+        help = "Control socket path (default: $XDG_RUNTIME_DIR/scd/control.sock or /run/scd/control.sock)"
+    )]
+    socket: Option<PathBuf>,
     #[arg(long)]
     font: Option<PathBuf>,
     #[arg(long)]
@@ -78,5 +81,5 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    wayland::run(args.socket, font)
+    wayland::run(paths::socket(args.socket), font)
 }

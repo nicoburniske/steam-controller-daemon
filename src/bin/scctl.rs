@@ -1,12 +1,15 @@
 use clap::{Parser, Subcommand};
-use scd::{Client, Config, ResultExt};
+use scd::{Client, Config, ResultExt, paths};
 use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(version, about = "Control the Steam Controller daemon")]
 struct Args {
-    #[arg(long, default_value = "/run/scd/control.sock")]
-    socket: PathBuf,
+    #[arg(
+        long,
+        help = "Control socket path (default: $XDG_RUNTIME_DIR/scd/control.sock or /run/scd/control.sock)"
+    )]
+    socket: Option<PathBuf>,
     #[command(subcommand)]
     command: Command,
 }
@@ -24,8 +27,10 @@ enum Command {
     Reload,
     Events,
     Validate {
-        #[arg(default_value = "/etc/scd/config.toml")]
-        path: PathBuf,
+        #[arg(
+            help = "Configuration path (default: $XDG_CONFIG_HOME/scd/config.toml or $HOME/.config/scd/config.toml)"
+        )]
+        path: Option<PathBuf>,
     },
 }
 
@@ -37,7 +42,7 @@ enum ModeAction {
 
 fn main() -> scd::Result<()> {
     let args = Args::parse();
-    let client = Client::new(args.socket);
+    let client = Client::new(paths::socket(args.socket));
     match args.command {
         Command::Status { json: true } => {
             println!("{}", serde_json::to_string(&client.status()?).whence()?)
@@ -74,7 +79,7 @@ fn main() -> scd::Result<()> {
             }
         }
         Command::Validate { path } => {
-            Config::load(path)?;
+            Config::load(paths::config(path)?)?;
             println!("configuration is valid");
         }
     }
