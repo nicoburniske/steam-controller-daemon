@@ -20,9 +20,9 @@ impl Half {
         if !position.into_iter().all(f32::is_finite) {
             return None;
         }
-        let center = if self == Self::Left { 0.25 } else { 0.75 };
+        let center = if self == Self::Left { 0.26 } else { 0.74 };
         Some([
-            center + position[0].clamp(-1.0, 1.0) * 0.3,
+            center + position[0].clamp(-1.0, 1.0) * 0.25,
             ((position[1].clamp(-1.0, 1.0) + 1.0) * 0.5).min(1.0 - f32::EPSILON),
         ])
     }
@@ -529,13 +529,16 @@ mod tests {
         let left_inner = Half::Left.project([1.0, 0.0]).unwrap();
         let right_inner = Half::Right.project([-1.0, 0.0]).unwrap();
         let right_outer = Half::Right.project([1.0, 1.0]).unwrap();
-        assert!((left_outer[0] + 0.05).abs() < f32::EPSILON);
-        assert!((left_inner[0] - 0.55).abs() < f32::EPSILON);
-        assert!((right_inner[0] - 0.45).abs() < f32::EPSILON);
-        assert!((right_outer[0] - 1.05).abs() < f32::EPSILON);
+        assert!(left_outer[0] > 0.0);
+        assert_eq!(left_outer[1], 0.0);
+        assert!(left_inner[0] > 0.5);
+        assert!(right_inner[0] < 0.5);
+        assert!(left_inner[0] - right_inner[0] < 0.03);
+        assert!(right_outer[0] < 1.0);
+        assert_eq!(right_outer[1], 1.0 - f32::EPSILON);
         assert_eq!(
-            hit_slot(Page::Letters, Half::Left, [5.0 / 6.0, 0.0]),
-            hit_slot(Page::Letters, Half::Right, [-5.0 / 6.0, 0.0])
+            hit_slot(Page::Letters, Half::Left, [24.0 / 25.0, 0.0]),
+            hit_slot(Page::Letters, Half::Right, [-24.0 / 25.0, 0.0])
         );
         assert_eq!(Half::Left.project([f32::NAN, 0.0]), None);
     }

@@ -64,7 +64,8 @@ pub struct OskClicks<'a> {
 }
 
 const OSK_CLICK_HISTORY_LEN: usize = 16;
-const OSK_PAD_SMOOTHING: f32 = 0.15;
+const OSK_PAD_MIN_RESPONSE: f32 = 0.15;
+const OSK_PAD_FULL_RESPONSE_DISTANCE: f32 = 0.02;
 
 pub struct Server {
     path: PathBuf,
@@ -147,8 +148,14 @@ impl OskState {
                 OskPadSide::Right => &mut self.right,
             };
             if pad.touched && previous.touched {
+                let delta = [
+                    pad.position[0] - previous.position[0],
+                    pad.position[1] - previous.position[1],
+                ];
+                let response = (delta[0].hypot(delta[1]) / OSK_PAD_FULL_RESPONSE_DISTANCE)
+                    .clamp(OSK_PAD_MIN_RESPONSE, 1.0);
                 for (current, previous) in pad.position.iter_mut().zip(previous.position) {
-                    *current = previous + OSK_PAD_SMOOTHING * (*current - previous);
+                    *current = previous + response * (*current - previous);
                 }
             }
             let clicked = record_rising_edge && pad.pressed && !previous.pressed;
@@ -483,11 +490,11 @@ mod tests {
             OskPad {
                 touched: true,
                 pressed: true,
-                position: [-0.5, 0.25],
+                position: [0.0, 0.0],
             },
             false,
         );
-        assert_eq!(state.left.position, [-0.5, 0.25]);
+        assert_eq!(state.left.position, [0.0, 0.0]);
         assert_eq!(state.click_cursor(), 0);
 
         state.update_pad(
@@ -495,7 +502,7 @@ mod tests {
             OskPad {
                 touched: true,
                 pressed: false,
-                position: [-0.5, 0.25],
+                position: [0.0, 0.0],
             },
             true,
         );
@@ -504,16 +511,27 @@ mod tests {
             OskPad {
                 touched: true,
                 pressed: true,
-                position: [0.5, -0.25],
+                position: [0.005, 0.0],
             },
             true,
         );
 
         let click = state.clicks_since(0).next().unwrap();
         assert_eq!(click.pad, OskPadSide::Left);
-        assert_eq!(click.position, [-0.35, 0.175]);
+        assert_eq!(click.position, [0.00125, 0.0]);
         assert_eq!(state.left.position, click.position);
         assert_eq!(state.click_cursor(), 1);
+
+        state.update_pad(
+            OskPadSide::Left,
+            OskPad {
+                touched: true,
+                pressed: false,
+                position: [0.5, 0.5],
+            },
+            true,
+        );
+        assert_eq!(state.left.position, [0.5, 0.5]);
 
         state.update_pad(
             OskPadSide::Left,
