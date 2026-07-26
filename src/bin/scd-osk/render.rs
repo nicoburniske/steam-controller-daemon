@@ -115,14 +115,18 @@ impl KeyboardRenderer {
                 height: (panel.height - 10.0).max(0.0),
             };
             let pointers = [Half::Left, Half::Right].map(|half| {
+                let inset_x = 19.0_f32.min(grid.width * 0.5);
+                let inset_y = 19.0_f32.min(grid.height * 0.5);
                 (
                     half,
                     keyboard
                         .pointer(half)
                         .and_then(|position| half.project(position))
                         .map(|[x, y]| LogicalPoint {
-                            x: grid.x + grid.width * x,
-                            y: grid.y + grid.height * y,
+                            x: (grid.x + grid.width * x)
+                                .clamp(grid.x + inset_x, grid.x + grid.width - inset_x),
+                            y: (grid.y + grid.height * y)
+                                .clamp(grid.y + inset_y, grid.y + grid.height - inset_y),
                         }),
                 )
             });

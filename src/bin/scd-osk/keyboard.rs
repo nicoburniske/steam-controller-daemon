@@ -35,8 +35,8 @@ impl Half {
         }
         let center = if self == Self::Left { 0.25 } else { 0.75 };
         Some([
-            center + position[0].clamp(-1.0, 1.0) * 0.3,
-            ((position[1].clamp(-1.0, 1.0) + 1.0) * 0.5).min(1.0 - f32::EPSILON),
+            (center + position[0].clamp(-1.0, 1.0) * 0.3).clamp(0.0, 1.0),
+            (0.5 + position[1].clamp(-1.0, 1.0) * 0.6).clamp(0.0, 1.0),
         ])
     }
 }
@@ -523,9 +523,9 @@ mod tests {
         state.set_visible(true);
         keyboard.update(state, &sender);
 
-        state.record_click(OskPadSide::Left, [-0.5, -0.5]);
-        state.record_click(OskPadSide::Right, [-1.0, -0.5]);
-        state.record_click(OskPadSide::Left, [-0.2, -0.5]);
+        state.record_click(OskPadSide::Left, [-0.5, -1.0 / 3.0]);
+        state.record_click(OskPadSide::Right, [-1.0, -1.0 / 3.0]);
+        state.record_click(OskPadSide::Left, [-0.2, -1.0 / 3.0]);
         state.set_visible(false);
         keyboard.update(state, &sender);
 
@@ -555,11 +555,11 @@ mod tests {
 
         for position in [
             [-0.9, 0.9],
-            [-0.9, -0.5],
+            [-0.9, -1.0 / 3.0],
             [-0.9, 0.9],
             [-0.9, 0.3],
-            [-0.5, -0.5],
-            [-0.5, -0.5],
+            [-0.5, -1.0 / 3.0],
+            [-0.5, -1.0 / 3.0],
         ] {
             state.record_click(OskPadSide::Left, position);
         }
@@ -594,7 +594,7 @@ mod tests {
         keyboard.update(state, &sender);
 
         state.shift_held = true;
-        state.record_click(OskPadSide::Left, [-0.5, -0.5]);
+        state.record_click(OskPadSide::Left, [-0.5, -1.0 / 3.0]);
         state.shift_held = false;
         state.record_click(OskPadSide::Right, [1.0, 0.9]);
         keyboard.update(state, &sender);
@@ -640,10 +640,10 @@ mod tests {
         let left_inner = Half::Left.project([1.0, 0.0]).unwrap();
         let right_inner = Half::Right.project([-1.0, 0.0]).unwrap();
         let right_outer = Half::Right.project([1.0, 1.0]).unwrap();
-        assert!((left_outer[0] + 0.05).abs() < f32::EPSILON);
+        assert_eq!(left_outer, [0.0, 0.0]);
         assert!((left_inner[0] - 0.55).abs() < f32::EPSILON);
         assert!((right_inner[0] - 0.45).abs() < f32::EPSILON);
-        assert!((right_outer[0] - 1.05).abs() < f32::EPSILON);
+        assert_eq!(right_outer, [1.0, 1.0]);
         assert_eq!(
             hit_slot(Page::Letters, Half::Left, [5.0 / 6.0, 0.0]),
             hit_slot(Page::Letters, Half::Right, [-5.0 / 6.0, 0.0])

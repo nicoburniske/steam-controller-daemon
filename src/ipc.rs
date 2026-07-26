@@ -70,6 +70,7 @@ pub struct OskClicks<'a> {
 const OSK_CLICK_HISTORY_LEN: usize = 16;
 const OSK_PAD_MIN_RESPONSE: f32 = 0.15;
 const OSK_PAD_FULL_RESPONSE_DISTANCE: f32 = 0.02;
+const OSK_PAD_VISIBLE_LIMIT: f32 = 5.0 / 6.0;
 
 pub struct Server {
     path: PathBuf,
@@ -150,19 +151,20 @@ impl OskState {
     }
 
     pub fn update_pad(&mut self, side: OskPadSide, mut pad: OskPad, record_rising_edge: bool) {
+        pad.position[0] = match side {
+            OskPadSide::Left => pad.position[0].clamp(-OSK_PAD_VISIBLE_LIMIT, 1.0),
+            OskPadSide::Right => pad.position[0].clamp(-1.0, OSK_PAD_VISIBLE_LIMIT),
+        };
+        pad.position[1] = pad.position[1].clamp(-OSK_PAD_VISIBLE_LIMIT, OSK_PAD_VISIBLE_LIMIT);
         let clicked = {
             let previous = match side {
                 OskPadSide::Left => &mut self.left,
                 OskPadSide::Right => &mut self.right,
             };
             if pad.touched && previous.touched {
-                let delta = [
-                    pad.position[0] - previous.position[0],
-                    pad.position[1] - previous.position[1],
-                ];
-                let response = (delta[0].hypot(delta[1]) / OSK_PAD_FULL_RESPONSE_DISTANCE)
-                    .clamp(OSK_PAD_MIN_RESPONSE, 1.0);
                 for (current, previous) in pad.position.iter_mut().zip(previous.position) {
+                    let response = ((*current - previous).abs() / OSK_PAD_FULL_RESPONSE_DISTANCE)
+                        .clamp(OSK_PAD_MIN_RESPONSE, 1.0);
                     *current = previous + response * (*current - previous);
                 }
             }
@@ -568,5 +570,32 @@ mod tests {
             true,
         );
         assert_eq!(state.left.position, [0.75, -0.75]);
+    }
+
+    #[test]
+    fn pad_edges_saturate_before_per_axis_filtering() {
+        let mut state = OskState::default();
+        let mut pad = OskPad {
+            touched: true,
+            ..Default::default()
+        };
+        state.update_pad(OskPadSide::Left, pad, false);
+        pad.position = [0.005, 0.02];
+        state.update_pad(OskPadSide::Left, pad, false);
+        assert_eq!(state.left.position, [0.00125, 0.02]);
+
+        pad.position = [-1.0, 1.0];
+        state.update_pad(OskPadSide::Left, pad, false);
+        assert_eq!(
+            state.left.position,
+            [-OSK_PAD_VISIBLE_LIMIT, OSK_PAD_VISIBLE_LIMIT]
+        );
+
+        pad.position = [1.0, -1.0];
+        state.update_pad(OskPadSide::Right, pad, false);
+        assert_eq!(
+            state.right.position,
+            [OSK_PAD_VISIBLE_LIMIT, -OSK_PAD_VISIBLE_LIMIT]
+        );
     }
 }
