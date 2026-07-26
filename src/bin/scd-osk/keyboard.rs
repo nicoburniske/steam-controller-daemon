@@ -1,5 +1,5 @@
 use evdev::KeyCode;
-use scd::{OskPad, OskPadSide, OskState};
+use scd::{OskPadSide, OskState};
 use std::sync::mpsc::Sender;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -17,7 +17,6 @@ pub enum Half {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Slot {
-    pub half: Half,
     pub row: u8,
     pub key: u8,
 }
@@ -26,7 +25,7 @@ pub struct Slot {
 pub struct Keyboard {
     page: Page,
     shifted: bool,
-    selected: [Option<Slot>; 2],
+    pointers: [Option<[f32; 2]>; 2],
     pressed: [bool; 2],
     click_cursor: u64,
     visible: bool,
@@ -116,47 +115,73 @@ const SHIFT: Key = Key {
     label: "Shift",
     shifted_label: None,
     action: Action::Shift,
-    weight: 14,
+    weight: 20,
 };
+const CAPS: Key = key!("Caps", KEY_CAPSLOCK, 16);
 const SYMBOLS: Key = Key {
     label: "?123",
     shifted_label: None,
     action: Action::Page(Page::Symbols),
     weight: 14,
 };
-const LETTERS: Key = Key {
+const ALPHABET: Key = Key {
     label: "ABC",
     shifted_label: None,
     action: Action::Page(Page::Letters),
     weight: 14,
 };
-const TAB: Key = key!("Tab", KEY_TAB);
-const SPACE: Key = key!("Space", KEY_SPACE, 36);
-const WIDE_SPACE: Key = key!("Space", KEY_SPACE, 46);
-const BACKSPACE: Key = key!("Backspace", KEY_BACKSPACE, 16);
-const ENTER: Key = key!("Enter", KEY_ENTER, 16);
+const TAB: Key = key!("Tab", KEY_TAB, 14);
+const SPACE: Key = key!("Space", KEY_SPACE, 60);
+const BACKSPACE: Key = key!("Backspace", KEY_BACKSPACE, 14);
+const ENTER: Key = key!("Enter", KEY_ENTER, 17);
 
-const LETTERS_LEFT: [&[Key]; 5] = [
+const LETTERS_PAGE: [&[Key]; 5] = [
     &[
+        character!("`", "~", KEY_GRAVE),
         character!("1", "!", KEY_1),
         character!("2", "@", KEY_2),
         character!("3", "#", KEY_3),
         character!("4", "$", KEY_4),
         character!("5", "%", KEY_5),
+        character!("6", "^", KEY_6),
+        character!("7", "&", KEY_7),
+        character!("8", "*", KEY_8),
+        character!("9", "(", KEY_9),
+        character!("0", ")", KEY_0),
+        character!("-", "_", KEY_MINUS),
+        character!("=", "+", KEY_EQUAL),
+        BACKSPACE,
     ],
     &[
+        TAB,
         character!("q", "Q", KEY_Q),
         character!("w", "W", KEY_W),
         character!("e", "E", KEY_E),
         character!("r", "R", KEY_R),
         character!("t", "T", KEY_T),
+        character!("y", "Y", KEY_Y),
+        character!("u", "U", KEY_U),
+        character!("i", "I", KEY_I),
+        character!("o", "O", KEY_O),
+        character!("p", "P", KEY_P),
+        character!("[", "{", KEY_LEFTBRACE),
+        character!("]", "}", KEY_RIGHTBRACE),
+        character!("\\", "|", KEY_BACKSLASH),
     ],
     &[
+        CAPS,
         character!("a", "A", KEY_A),
         character!("s", "S", KEY_S),
         character!("d", "D", KEY_D),
         character!("f", "F", KEY_F),
         character!("g", "G", KEY_G),
+        character!("h", "H", KEY_H),
+        character!("j", "J", KEY_J),
+        character!("k", "K", KEY_K),
+        character!("l", "L", KEY_L),
+        character!(";", ":", KEY_SEMICOLON),
+        character!("'", "\"", KEY_APOSTROPHE),
+        ENTER,
     ],
     &[
         SHIFT,
@@ -164,77 +189,24 @@ const LETTERS_LEFT: [&[Key]; 5] = [
         character!("x", "X", KEY_X),
         character!("c", "C", KEY_C),
         character!("v", "V", KEY_V),
-    ],
-    &[SYMBOLS, TAB, SPACE],
-];
-
-const LETTERS_RIGHT: [&[Key]; 5] = [
-    &[
-        character!("6", "^", KEY_6),
-        character!("7", "&", KEY_7),
-        character!("8", "*", KEY_8),
-        character!("9", "(", KEY_9),
-        character!("0", ")", KEY_0),
-    ],
-    &[
-        character!("y", "Y", KEY_Y),
-        character!("u", "U", KEY_U),
-        character!("i", "I", KEY_I),
-        character!("o", "O", KEY_O),
-        character!("p", "P", KEY_P),
-    ],
-    &[
-        character!("h", "H", KEY_H),
-        character!("j", "J", KEY_J),
-        character!("k", "K", KEY_K),
-        character!("l", "L", KEY_L),
-        BACKSPACE,
-    ],
-    &[
         character!("b", "B", KEY_B),
         character!("n", "N", KEY_N),
         character!("m", "M", KEY_M),
         character!(",", "<", KEY_COMMA),
         character!(".", ">", KEY_DOT),
-        ENTER,
+        character!("/", "?", KEY_SLASH),
+        SHIFT,
     ],
-    &[WIDE_SPACE, character!("'", "\"", KEY_APOSTROPHE), SYMBOLS],
+    &[SYMBOLS, TAB, SPACE, BACKSPACE, ENTER, SYMBOLS],
 ];
 
-const SYMBOLS_LEFT: [&[Key]; 5] = [
+const SYMBOLS_PAGE: [&[Key]; 5] = [
     &[
         key!("1", KEY_1),
         key!("2", KEY_2),
         key!("3", KEY_3),
         key!("4", KEY_4),
         key!("5", KEY_5),
-    ],
-    &[
-        key!("!", KEY_1, shift),
-        key!("@", KEY_2, shift),
-        key!("#", KEY_3, shift),
-        key!("$", KEY_4, shift),
-        key!("%", KEY_5, shift),
-    ],
-    &[
-        key!("`", KEY_GRAVE),
-        key!("~", KEY_GRAVE, shift),
-        key!("-", KEY_MINUS),
-        key!("_", KEY_MINUS, shift),
-        key!("=", KEY_EQUAL),
-    ],
-    &[
-        key!(";", KEY_SEMICOLON),
-        key!(":", KEY_SEMICOLON, shift),
-        key!("'", KEY_APOSTROPHE),
-        key!("\"", KEY_APOSTROPHE, shift),
-        key!("/", KEY_SLASH),
-    ],
-    &[LETTERS, TAB, SPACE],
-];
-
-const SYMBOLS_RIGHT: [&[Key]; 5] = [
-    &[
         key!("6", KEY_6),
         key!("7", KEY_7),
         key!("8", KEY_8),
@@ -242,6 +214,11 @@ const SYMBOLS_RIGHT: [&[Key]; 5] = [
         key!("0", KEY_0),
     ],
     &[
+        key!("!", KEY_1, shift),
+        key!("@", KEY_2, shift),
+        key!("#", KEY_3, shift),
+        key!("$", KEY_4, shift),
+        key!("%", KEY_5, shift),
         key!("^", KEY_6, shift),
         key!("&", KEY_7, shift),
         key!("*", KEY_8, shift),
@@ -249,6 +226,11 @@ const SYMBOLS_RIGHT: [&[Key]; 5] = [
         key!(")", KEY_0, shift),
     ],
     &[
+        key!("`", KEY_GRAVE),
+        key!("~", KEY_GRAVE, shift),
+        key!("-", KEY_MINUS),
+        key!("_", KEY_MINUS, shift),
+        key!("=", KEY_EQUAL),
         key!("+", KEY_EQUAL, shift),
         key!("[", KEY_LEFTBRACE),
         key!("]", KEY_RIGHTBRACE),
@@ -256,6 +238,11 @@ const SYMBOLS_RIGHT: [&[Key]; 5] = [
         key!("}", KEY_RIGHTBRACE, shift),
     ],
     &[
+        key!(";", KEY_SEMICOLON),
+        key!(":", KEY_SEMICOLON, shift),
+        key!("'", KEY_APOSTROPHE),
+        key!("\"", KEY_APOSTROPHE, shift),
+        key!("/", KEY_SLASH),
         key!("?", KEY_SLASH, shift),
         key!(",", KEY_COMMA),
         key!(".", KEY_DOT),
@@ -264,12 +251,12 @@ const SYMBOLS_RIGHT: [&[Key]; 5] = [
         key!("\\", KEY_BACKSLASH),
         key!("|", KEY_BACKSLASH, shift),
     ],
-    &[WIDE_SPACE, BACKSPACE, ENTER, LETTERS],
+    &[ALPHABET, TAB, SPACE, BACKSPACE, ENTER, ALPHABET],
 ];
 
 impl Keyboard {
     pub fn update(&mut self, state: OskState, output: &Sender<KeyStroke>) -> bool {
-        let before = (self.page, self.shifted, self.selected, self.pressed);
+        let before = (self.page, self.shifted, self.pointers, self.pressed);
         let accept_clicks = self.initialized && (state.visible || self.visible);
         if !self.initialized {
             self.initialized = true;
@@ -323,10 +310,10 @@ impl Keyboard {
         }
         self.click_cursor = state.click_cursor();
 
-        self.selected = if state.visible {
+        self.pointers = if state.visible {
             [
-                selected(self.page, Half::Left, state.left),
-                selected(self.page, Half::Right, state.right),
+                state.left.touched.then_some(state.left.position),
+                state.right.touched.then_some(state.right.position),
             ]
         } else {
             [None, None]
@@ -337,14 +324,14 @@ impl Keyboard {
             [false, false]
         };
         self.visible = state.visible;
-        before != (self.page, self.shifted, self.selected, self.pressed)
+        before != (self.page, self.shifted, self.pointers, self.pressed)
     }
 
     pub fn disconnect(&mut self) -> bool {
-        let changed = self.selected != [None, None] || self.pressed != [false, false];
+        let changed = self.pointers != [None, None] || self.pressed != [false, false];
         self.initialized = false;
         self.visible = false;
-        self.selected = [None, None];
+        self.pointers = [None, None];
         self.pressed = [false, false];
         changed
     }
@@ -353,46 +340,43 @@ impl Keyboard {
         &self,
         width: f32,
         height: f32,
-        mut visit: impl FnMut(Slot, &'static str, [f32; 4], bool, bool),
+        mut visit: impl FnMut(Slot, &'static str, Option<&'static str>, [f32; 4], bool, bool),
     ) {
-        for half in [Half::Left, Half::Right] {
-            let rows = rows(self.page, half);
-            let half_width = width / 2.0;
-            let origin_x = if half == Half::Left { 0.0 } else { half_width };
-            let row_height = height / rows.len() as f32;
-            for (row_index, row) in rows.iter().enumerate() {
-                let total_weight = row.iter().map(|key| u32::from(key.weight)).sum::<u32>();
-                let mut x = origin_x;
-                for (key_index, key) in row.iter().enumerate() {
-                    let key_width = half_width * f32::from(key.weight) / total_weight as f32;
-                    let slot = Slot {
-                        half,
+        let rows = rows(self.page);
+        let row_height = height / rows.len() as f32;
+        for (row_index, row) in rows.iter().enumerate() {
+            let total_weight = row.iter().map(|key| u32::from(key.weight)).sum::<u32>();
+            let mut x = 0.0;
+            for (key_index, key) in row.iter().enumerate() {
+                let key_width = width * f32::from(key.weight) / total_weight as f32;
+                let shifted_label = key.shifted_label.filter(|_| {
+                    key.label.len() != 1 || !key.label.as_bytes()[0].is_ascii_alphabetic()
+                });
+                let (label, secondary_label) = match (self.shifted, key.shifted_label) {
+                    (true, Some(shifted)) => (shifted, shifted_label.map(|_| key.label)),
+                    _ => (key.label, shifted_label),
+                };
+                let active = matches!(key.action, Action::Shift) && self.shifted;
+                let special =
+                    matches!(key.action, Action::Shift | Action::Page(_)) || key.label.len() > 2;
+                visit(
+                    Slot {
                         row: row_index as u8,
                         key: key_index as u8,
-                    };
-                    let label = if self.shifted {
-                        key.shifted_label.unwrap_or(key.label)
-                    } else {
-                        key.label
-                    };
-                    let active = matches!(key.action, Action::Shift) && self.shifted;
-                    let special = matches!(key.action, Action::Shift | Action::Page(_))
-                        || key.label.len() > 2;
-                    visit(
-                        slot,
-                        label,
-                        [x, row_index as f32 * row_height, key_width, row_height],
-                        active,
-                        special,
-                    );
-                    x += key_width;
-                }
+                    },
+                    label,
+                    secondary_label,
+                    [x, row_index as f32 * row_height, key_width, row_height],
+                    active,
+                    special,
+                );
+                x += key_width;
             }
         }
     }
 
-    pub fn selected(&self, half: Half) -> Option<Slot> {
-        self.selected[usize::from(half == Half::Right)]
+    pub fn pointer(&self, half: Half) -> Option<[f32; 2]> {
+        self.pointers[usize::from(half == Half::Right)]
     }
 
     pub fn pressed(&self, half: Half) -> bool {
@@ -400,34 +384,29 @@ impl Keyboard {
     }
 }
 
-fn selected(page: Page, half: Half, pad: OskPad) -> Option<Slot> {
-    pad.touched
-        .then(|| hit_slot(page, half, pad.position))
-        .flatten()
-}
-
 fn hit(page: Page, half: Half, position: [f32; 2]) -> Option<Action> {
     let slot = hit_slot(page, half, position)?;
-    Some(rows(page, half)[usize::from(slot.row)][usize::from(slot.key)].action)
+    Some(rows(page)[usize::from(slot.row)][usize::from(slot.key)].action)
 }
 
 fn hit_slot(page: Page, half: Half, position: [f32; 2]) -> Option<Slot> {
     if !position.into_iter().all(f32::is_finite) {
         return None;
     }
-    let rows = rows(page, half);
+    let rows = rows(page);
     let y = ((position[1].clamp(-1.0, 1.0) + 1.0) * 0.5 * rows.len() as f32)
         .floor()
         .min(rows.len() as f32 - 1.0) as usize;
     let row = rows[y];
     let total_weight = row.iter().map(|key| u32::from(key.weight)).sum::<u32>();
-    let target = (position[0].clamp(-1.0, 1.0) + 1.0) * 0.5 * total_weight as f32;
+    let target = ((position[0].clamp(-1.0, 1.0) + 1.0) * 0.25
+        + if half == Half::Left { 0.0 } else { 0.5 })
+        * total_weight as f32;
     let mut boundary = 0.0;
     for (key, spec) in row.iter().enumerate() {
         boundary += f32::from(spec.weight);
-        if target <= boundary || key + 1 == row.len() {
+        if target < boundary || key + 1 == row.len() {
             return Some(Slot {
-                half,
                 row: y as u8,
                 key: key as u8,
             });
@@ -436,12 +415,10 @@ fn hit_slot(page: Page, half: Half, position: [f32; 2]) -> Option<Slot> {
     None
 }
 
-fn rows(page: Page, half: Half) -> &'static [&'static [Key]; 5] {
-    match (page, half) {
-        (Page::Letters, Half::Left) => &LETTERS_LEFT,
-        (Page::Letters, Half::Right) => &LETTERS_RIGHT,
-        (Page::Symbols, Half::Left) => &SYMBOLS_LEFT,
-        (Page::Symbols, Half::Right) => &SYMBOLS_RIGHT,
+fn rows(page: Page) -> &'static [&'static [Key]; 5] {
+    match page {
+        Page::Letters => &LETTERS_PAGE,
+        Page::Symbols => &SYMBOLS_PAGE,
     }
 }
 
@@ -457,9 +434,9 @@ mod tests {
         state.set_visible(true);
         keyboard.update(state, &sender);
 
-        state.record_click(OskPadSide::Left, [-0.9, -0.5]);
-        state.record_click(OskPadSide::Right, [-0.9, -0.5]);
         state.record_click(OskPadSide::Left, [-0.5, -0.5]);
+        state.record_click(OskPadSide::Right, [-1.0, -0.5]);
+        state.record_click(OskPadSide::Left, [-0.2, -0.5]);
         state.set_visible(false);
         keyboard.update(state, &sender);
 
@@ -492,8 +469,8 @@ mod tests {
             [-0.9, -0.5],
             [-0.9, 0.9],
             [-0.9, 0.3],
-            [-0.9, -0.5],
-            [-0.9, -0.5],
+            [-0.5, -0.5],
+            [-0.5, -0.5],
         ] {
             state.record_click(OskPadSide::Left, position);
         }
@@ -517,5 +494,25 @@ mod tests {
             receiver.try_recv(),
             Err(std::sync::mpsc::TryRecvError::Empty)
         );
+    }
+
+    #[test]
+    fn pointer_motion_invalidates_without_changing_the_key() {
+        let (sender, _) = std::sync::mpsc::channel();
+        let mut keyboard = Keyboard::default();
+        let mut state = OskState::default();
+        state.set_visible(true);
+        state.left.touched = true;
+        state.left.position = [-0.8, -0.5];
+
+        assert!(keyboard.update(state, &sender));
+        assert_eq!(keyboard.pointer(Half::Left), Some([-0.8, -0.5]));
+        assert!(!keyboard.update(state, &sender));
+
+        state.left.position[0] = -0.7;
+        assert!(keyboard.update(state, &sender));
+        assert_eq!(keyboard.pointer(Half::Left), Some([-0.7, -0.5]));
+        assert!(keyboard.disconnect());
+        assert_eq!(keyboard.pointer(Half::Left), None);
     }
 }

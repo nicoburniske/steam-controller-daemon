@@ -190,6 +190,7 @@ impl State {
     }
 
     fn show(&mut self) -> Result<()> {
+        self.layer.set_layer(Layer::Overlay);
         self.layer
             .set_anchor(Anchor::LEFT | Anchor::RIGHT | Anchor::BOTTOM);
         self.layer.set_size(0, HEIGHT);
