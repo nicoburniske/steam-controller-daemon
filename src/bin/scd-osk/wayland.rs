@@ -286,7 +286,7 @@ impl State {
         buffer.attach_to(self.layer.wl_surface()).whence()?;
         self.layer.commit();
         self.frame_pending = true;
-        self.redraw_pending = false;
+        self.redraw_pending = self.renderer.animation_pending();
         Ok(())
     }
 }

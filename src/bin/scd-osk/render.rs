@@ -1,9 +1,11 @@
 use crate::keyboard::{Half, Keyboard};
 use blit::{
     RepaintBuffer, Runtime,
+    animation::Easing,
     color::Color,
     geometry::{LogicalPoint, LogicalRect, LogicalSize, PhysicalRect},
     input::Input,
+    interact::WidgetId,
     keyboard::KeyboardRequest,
     paint::{HorizontalAlign, TextOptions, TextRequest, VerticalAlign},
     paint_list::PaintList,
@@ -15,13 +17,14 @@ use blit_cpu::{Font, FontFace, Renderer, RendererConfig, Scanline, VecBuffer};
 use evdev::KeyCode;
 use scd::{ControllerButton, Error, Result, ResultExt};
 use std::hash::Hash;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub struct KeyboardRenderer {
     runtime: Runtime<BlitPlatform>,
     logical_size: [u32; 2],
     physical_size: [u32; 2],
     scale: u32,
+    started_at: Instant,
 }
 
 struct BlitPlatform {
@@ -60,6 +63,7 @@ impl KeyboardRenderer {
             logical_size: [width, height],
             physical_size: [physical_width, physical_height],
             scale,
+            started_at: Instant::now(),
         })
     }
 
@@ -83,7 +87,8 @@ impl KeyboardRenderer {
     }
 
     pub fn render(&mut self, keyboard: &Keyboard) {
-        self.runtime.render(Duration::ZERO, Input::None, |ui| {
+        let time = self.started_at.elapsed();
+        self.runtime.render(time, Input::None, |ui| {
             let screen = ui.screen();
             blit::paint::Rectangle::new(screen)
                 .background(Color::from_rgba8(35, 38, 46, 255))
@@ -125,25 +130,43 @@ impl KeyboardRenderer {
                         pointer.is_some_and(|pointer| cell.contains(pointer.x, pointer.y))
                             && keyboard.pressed(*half)
                     });
-                    let background = if pressed || active {
-                        Color::from_rgba8(26, 159, 255, 255)
-                    } else if hovered {
+                    let background = if hovered {
                         Color::WHITE
                     } else if special && primary != "Space" {
                         Color::BLACK
                     } else {
                         Color::from_rgba8(14, 20, 27, 255)
                     };
-                    let text = if hovered && !pressed && !active {
+                    let press = ui
+                        .animate(
+                            WidgetId::new(("key press", slot)),
+                            f32::from(pressed || active),
+                            if pressed || active {
+                                Duration::from_millis(45)
+                            } else {
+                                Duration::from_millis(110)
+                            },
+                            Easing::EaseOutQuad,
+                        )
+                        .value()
+                        .clamp(0.0, 1.0);
+                    let background = Color::from_rgba8(
+                        (background.red as f32 * (1.0 - press) + 26.0 * press).round() as u8,
+                        (background.green as f32 * (1.0 - press) + 159.0 * press).round() as u8,
+                        (background.blue as f32 * (1.0 - press) + 255.0 * press).round() as u8,
+                        255,
+                    );
+                    let text = if hovered && press < 0.35 {
                         Color::from_rgba8(14, 20, 27, 255)
                     } else {
                         Color::WHITE
                     };
+                    let inset = 2.0 + press * 2.0;
                     let key = LogicalRect {
-                        x: cell.x + 2.0,
-                        y: cell.y + 2.0,
-                        width: (cell.width - 4.0).max(0.0),
-                        height: (cell.height - 4.0).max(0.0),
+                        x: cell.x + inset,
+                        y: cell.y + inset,
+                        width: (cell.width - inset * 2.0).max(0.0),
+                        height: (cell.height - inset * 2.0).max(0.0),
                     };
                     let hint = target.and_then(|target| {
                         bindings
@@ -192,7 +215,7 @@ impl KeyboardRenderer {
                         } else {
                             text
                         })
-                        .uniform_radius(1.0)
+                        .uniform_radius(1.0 + press * 3.0)
                         .padding_x(if special { 10.0 } else { 2.0 })
                         .padding_y(if secondary.is_some() { 7.0 } else { 2.0 })
                         .text_size(if special { 17.0 } else { 22.0 })
@@ -278,6 +301,10 @@ impl KeyboardRenderer {
                 .render(ui);
             }
         });
+    }
+
+    pub fn animation_pending(&self) -> bool {
+        self.runtime.has_pending_redraw()
     }
 
     pub fn pixels(&mut self) -> &[u32] {
