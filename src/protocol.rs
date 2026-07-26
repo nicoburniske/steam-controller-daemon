@@ -210,7 +210,7 @@ pub enum Button {
     Qam = 1 << 4,
     #[serde(rename = "right-stick-click", alias = "r3")]
     R3 = 1 << 5,
-    View = 1 << 6,
+    Menu = 1 << 6,
     R4 = 1 << 7,
     R5 = 1 << 8,
     #[serde(rename = "right-bumper", alias = "rb")]
@@ -219,7 +219,7 @@ pub enum Button {
     DpadRight = 1 << 11,
     DpadLeft = 1 << 12,
     DpadUp = 1 << 13,
-    Menu = 1 << 14,
+    View = 1 << 14,
     #[serde(rename = "left-stick-click", alias = "l3")]
     L3 = 1 << 15,
     Steam = 1 << 16,
@@ -247,7 +247,7 @@ impl Button {
         Self::Y,
         Self::Qam,
         Self::R3,
-        Self::View,
+        Self::Menu,
         Self::R4,
         Self::R5,
         Self::Rb,
@@ -255,7 +255,7 @@ impl Button {
         Self::DpadRight,
         Self::DpadLeft,
         Self::DpadUp,
-        Self::Menu,
+        Self::View,
         Self::L3,
         Self::Steam,
         Self::L4,

@@ -180,8 +180,9 @@ impl Outputs {
                 let code = match button {
                     GamepadButton::South => KeyCode::BTN_SOUTH,
                     GamepadButton::East => KeyCode::BTN_EAST,
-                    GamepadButton::North => KeyCode::BTN_NORTH,
-                    GamepadButton::West => KeyCode::BTN_WEST,
+                    // xbox x/y aliases are BTN_NORTH/BTN_WEST
+                    GamepadButton::North => KeyCode::BTN_WEST,
+                    GamepadButton::West => KeyCode::BTN_NORTH,
                     GamepadButton::LeftBumper => KeyCode::BTN_TL,
                     GamepadButton::RightBumper => KeyCode::BTN_TR,
                     GamepadButton::LeftTrigger => KeyCode::BTN_TL2,
