@@ -443,6 +443,15 @@ impl Mapper {
             .map(|(input, key)| (*input, key.code()))
     }
 
+    pub fn active_osk_bindings(&self) -> impl Iterator<Item = Button> + '_ {
+        self.config
+            .osk
+            .bindings
+            .keys()
+            .copied()
+            .filter(|input| self.osk_active.contains(*input))
+    }
+
     fn mode(&self) -> &crate::config::Mode {
         self.config
             .modes
@@ -1054,6 +1063,11 @@ mod tests {
             expected.map(|key| Output::Key { key, pressed: true })
         );
         assert!(mapper.keyboard_shifted());
+        assert!(
+            mapper
+                .active_osk_bindings()
+                .any(|input| input == Button::L4)
+        );
         assert_eq!(keyboard_mapped(&mut mapper, &held), []);
 
         let mut outputs = Vec::new();
@@ -1067,6 +1081,7 @@ mod tests {
             })
         );
         assert!(!mapper.keyboard_shifted());
+        assert_eq!(mapper.active_osk_bindings().count(), 0);
     }
 
     #[test]

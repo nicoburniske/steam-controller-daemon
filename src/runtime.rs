@@ -62,6 +62,9 @@ impl Daemon {
                     },
                     Request::ModeSet { name } => match mapper.set_mode(&name, &mut mapped) {
                         Ok(()) => {
+                            keyboard.set_active_bindings(mapper.active_osk_bindings());
+                            keyboard.shift_held = mapper.keyboard_shifted();
+                            osk.send_replace(keyboard);
                             Self::emit(
                                 &mut mapped,
                                 &mut mapper,
@@ -79,6 +82,9 @@ impl Daemon {
                     },
                     Request::ModeNext => {
                         mapper.next_mode(&mut mapped);
+                        keyboard.set_active_bindings(mapper.active_osk_bindings());
+                        keyboard.shift_held = mapper.keyboard_shifted();
+                        osk.send_replace(keyboard);
                         Self::emit(
                             &mut mapped,
                             &mut mapper,
@@ -94,6 +100,7 @@ impl Daemon {
                         Ok(config) => match mapper.reload(config, &mut mapped) {
                             Ok(()) => {
                                 keyboard.set_bindings(mapper.osk_bindings());
+                                keyboard.set_active_bindings(mapper.active_osk_bindings());
                                 keyboard.shift_held = mapper.keyboard_shifted();
                                 osk.send_replace(keyboard);
                                 Self::emit(
@@ -188,6 +195,7 @@ impl Daemon {
                             _ => {}
                         }
                         if keyboard.visible {
+                            keyboard.set_active_bindings(mapper.active_osk_bindings());
                             keyboard.shift_held = mapper.keyboard_shifted();
                             for (side, source) in [
                                 (OskPadSide::Left, state.left_pad),

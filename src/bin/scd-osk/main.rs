@@ -53,6 +53,7 @@ fn main() -> Result<()> {
             (ControllerButton::X, KeyCode::KEY_BACKSPACE),
             (ControllerButton::Y, KeyCode::KEY_SPACE),
         ]);
+        state.set_active_bindings([ControllerButton::R4, ControllerButton::X]);
         state.left = OskPad {
             touched: true,
             pressed: true,

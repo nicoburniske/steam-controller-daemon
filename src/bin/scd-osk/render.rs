@@ -119,72 +119,12 @@ impl KeyboardRenderer {
                 .render(ui);
 
             let bindings = keyboard.bindings();
-            let paddle_count = [
-                ControllerButton::L4,
-                ControllerButton::L5,
-                ControllerButton::R4,
-                ControllerButton::R5,
-            ]
-            .into_iter()
-            .filter(|input| bindings.get(*input).and_then(Keyboard::key_label).is_some())
-            .count();
-            let legend_height = if paddle_count == 0 { 0.0 } else { 34.0 };
             let grid = LogicalRect {
                 x: panel.x + 5.0,
-                y: panel.y + 5.0 + legend_height,
+                y: panel.y + 5.0,
                 width: (panel.width - 10.0).max(0.0),
-                height: (panel.height - 10.0 - legend_height).max(0.0),
+                height: (panel.height - 10.0).max(0.0),
             };
-            if paddle_count != 0 {
-                let width = (grid.width / paddle_count as f32).min(180.0);
-                let mut x = grid.x + (grid.width - width * paddle_count as f32) * 0.5;
-                for input in [
-                    ControllerButton::L4,
-                    ControllerButton::L5,
-                    ControllerButton::R4,
-                    ControllerButton::R5,
-                ] {
-                    let Some(key) = bindings.get(input) else {
-                        continue;
-                    };
-                    let Some(label) = Keyboard::key_label(key) else {
-                        continue;
-                    };
-                    let area = LogicalRect {
-                        x: x + 2.0,
-                        y: panel.y + 7.0,
-                        width: (width - 4.0).max(0.0),
-                        height: 30.0,
-                    };
-                    Button::new(label)
-                        .id(("modifier", input))
-                        .background(Color::from_rgba8(14, 20, 27, 255))
-                        .text_color(Color::WHITE)
-                        .uniform_radius(3.0)
-                        .padding_x(40.0)
-                        .padding_y(2.0)
-                        .text_size(14.0)
-                        .text_weight(600)
-                        .text_options(TextOptions {
-                            horizontal_align: HorizontalAlign::Center,
-                            vertical_align: VerticalAlign::Center,
-                            ..Default::default()
-                        })
-                        .render(ui, area);
-                    render_hint(
-                        ui,
-                        ControllerHint::from(input).expect("paddles have keyboard hints"),
-                        ("modifier hint", input),
-                        LogicalRect {
-                            x: area.x + 6.0,
-                            y: area.y + 3.0,
-                            width: 36.0,
-                            height: 24.0,
-                        },
-                    );
-                    x += width;
-                }
-            }
             let pointers = [Half::Left, Half::Right].map(|half| {
                 let inset_x = 19.0_f32.min(grid.width * 0.5);
                 let inset_y = 19.0_f32.min(grid.height * 0.5);
@@ -295,10 +235,8 @@ impl KeyboardRenderer {
                                         configured,
                                         KeyCode::KEY_LEFTSHIFT | KeyCode::KEY_RIGHTSHIFT
                                     );
-                            let Some(hint) = same_key
-                                .then(|| ControllerHint::from(input))
-                                .flatten()
-                                .filter(|hint| !matches!(hint, ControllerHint::Paddle(_)))
+                            let Some(hint) =
+                                same_key.then(|| ControllerHint::from(input)).flatten()
                             else {
                                 continue;
                             };
@@ -406,32 +344,40 @@ impl ControllerHint {
 }
 
 fn render_hint(ui: &mut blit::Ui, hint: ControllerHint, id: impl Hash, area: LogicalRect) {
-    let (label, background, text, radius) = match hint {
+    let (label, background, text, radius, border) = match hint {
         ControllerHint::Face(label) => (
             label,
             Color::from_rgba8(26, 159, 255, 255),
             Color::WHITE,
             12.0,
+            2.0,
         ),
         ControllerHint::Trigger(label) => (
             label,
             Color::from_rgba8(222, 226, 232, 255),
             Color::from_rgba8(14, 20, 27, 255),
             4.0,
+            0.0,
         ),
         ControllerHint::Paddle(label) => (
             label,
             Color::from_rgba8(83, 91, 104, 255),
             Color::WHITE,
             4.0,
+            0.0,
         ),
-        ControllerHint::Control(label) => {
-            (label, Color::from_rgba8(54, 60, 70, 255), Color::WHITE, 4.0)
-        }
+        ControllerHint::Control(label) => (
+            label,
+            Color::from_rgba8(54, 60, 70, 255),
+            Color::WHITE,
+            4.0,
+            0.0,
+        ),
     };
     Button::new(label)
         .id(id)
         .background(background)
+        .border(border, Color::from_rgba8(14, 20, 27, 255))
         .text_color(text)
         .uniform_radius(radius)
         .padding_x(0.0)

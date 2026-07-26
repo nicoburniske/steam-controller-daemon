@@ -32,6 +32,8 @@ pub struct OskState {
     pub shift_held: bool,
     #[serde(default)]
     bindings: OskBindings,
+    #[serde(default)]
+    active_bindings: u32,
     pub left: OskPad,
     pub right: OskPad,
     session: u64,
@@ -160,6 +162,7 @@ impl OskState {
         }
         self.visible = visible;
         self.shift_held = false;
+        self.active_bindings = 0;
         self.left.touched = false;
         self.left.pressed = false;
         self.right.touched = false;
@@ -174,11 +177,24 @@ impl OskState {
         self.bindings
     }
 
+    pub fn active_bindings(&self) -> u32 {
+        self.active_bindings
+    }
+
     pub fn set_bindings(&mut self, bindings: impl IntoIterator<Item = (Button, KeyCode)>) {
         self.bindings.0.fill(0);
+        let mut configured = 0;
         for (input, key) in bindings {
             self.bindings.0[input.index()] = key.code();
+            configured |= input.mask();
         }
+        self.active_bindings &= configured;
+    }
+
+    pub fn set_active_bindings(&mut self, bindings: impl IntoIterator<Item = Button>) {
+        self.active_bindings = bindings
+            .into_iter()
+            .fold(0, |active, input| active | input.mask());
     }
 
     pub fn update_pad(&mut self, side: OskPadSide, mut pad: OskPad, record_rising_edge: bool) {
@@ -546,6 +562,9 @@ mod tests {
             state.bindings().get(Button::X),
             Some(KeyCode::KEY_BACKSPACE)
         );
+        state.set_active_bindings([Button::L4, Button::X]);
+        assert_ne!(state.active_bindings() & Button::L4.mask(), 0);
+        assert_ne!(state.active_bindings() & Button::X.mask(), 0);
 
         state.set_bindings([(Button::L4, KeyCode::KEY_LEFTCTRL)]);
         assert_eq!(
@@ -553,6 +572,8 @@ mod tests {
             Some(KeyCode::KEY_LEFTCTRL)
         );
         assert_eq!(state.bindings().get(Button::X), None);
+        assert_ne!(state.active_bindings() & Button::L4.mask(), 0);
+        assert_eq!(state.active_bindings() & Button::X.mask(), 0);
     }
 
     #[test]

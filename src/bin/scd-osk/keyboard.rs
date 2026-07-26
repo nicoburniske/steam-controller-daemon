@@ -45,6 +45,7 @@ pub struct Keyboard {
     shifted: bool,
     shift_held: bool,
     bindings: OskBindings,
+    active_bindings: u32,
     pointers: [Option<[f32; 2]>; 2],
     pressed: [bool; 2],
     click_cursor: u64,
@@ -288,6 +289,7 @@ impl Keyboard {
             self.shifted,
             self.shift_held,
             self.bindings,
+            self.active_bindings,
             self.pointers,
             self.pressed,
         );
@@ -370,6 +372,7 @@ impl Keyboard {
         };
         self.shift_held = state.visible && state.shift_held;
         self.bindings = state.bindings();
+        self.active_bindings = state.active_bindings();
         self.visible = state.visible;
         before
             != (
@@ -377,17 +380,21 @@ impl Keyboard {
                 self.shifted,
                 self.shift_held,
                 self.bindings,
+                self.active_bindings,
                 self.pointers,
                 self.pressed,
             )
     }
 
     pub fn disconnect(&mut self) -> bool {
-        let changed =
-            self.shift_held || self.pointers != [None, None] || self.pressed != [false, false];
+        let changed = self.shift_held
+            || self.active_bindings != 0
+            || self.pointers != [None, None]
+            || self.pressed != [false, false];
         self.initialized = false;
         self.visible = false;
         self.shift_held = false;
+        self.active_bindings = 0;
         self.pointers = [None, None];
         self.pressed = [false, false];
         changed
@@ -422,7 +429,6 @@ impl Keyboard {
                     (true, Some(shifted)) => (shifted, shifted_label.map(|_| key.label)),
                     _ => (key.label, shifted_label),
                 };
-                let active = matches!(key.action, Action::Shift) && shifted;
                 let special = matches!(key.action, Action::Shift | Action::Page(_) | Action::Close)
                     || key.label.len() > 2;
                 let target = match key.action {
@@ -430,6 +436,8 @@ impl Keyboard {
                     Action::Shift => Some(KeyCode::KEY_LEFTSHIFT),
                     Action::Page(_) | Action::Close => None,
                 };
+                let active = matches!(key.action, Action::Shift) && shifted
+                    || target.is_some_and(|target| self.key_active(target));
                 visit(
                     Slot {
                         row: row_index as u8,
@@ -459,26 +467,13 @@ impl Keyboard {
         self.bindings
     }
 
-    pub fn key_label(code: KeyCode) -> Option<&'static str> {
-        match code {
-            KeyCode::KEY_LEFTMETA | KeyCode::KEY_RIGHTMETA => Some("Super"),
-            KeyCode::KEY_LEFTCTRL | KeyCode::KEY_RIGHTCTRL => Some("Ctrl"),
-            KeyCode::KEY_LEFTSHIFT | KeyCode::KEY_RIGHTSHIFT => Some("Shift"),
-            KeyCode::KEY_LEFTALT | KeyCode::KEY_RIGHTALT => Some("Alt"),
-            KeyCode::KEY_ESC => Some("Esc"),
-            KeyCode::KEY_UP => Some("Up"),
-            KeyCode::KEY_DOWN => Some("Down"),
-            KeyCode::KEY_LEFT => Some("Left"),
-            KeyCode::KEY_RIGHT => Some("Right"),
-            _ => LETTERS_PAGE
-                .into_iter()
-                .chain(SYMBOLS_PAGE)
-                .flatten()
-                .find_map(|key| match key.action {
-                    Action::Key { code: target, .. } if target == code => Some(key.label),
-                    _ => None,
-                }),
-        }
+    fn key_active(&self, target: KeyCode) -> bool {
+        self.bindings.iter().any(|(input, configured)| {
+            self.active_bindings & input.mask() != 0
+                && (configured == target
+                    || target == KeyCode::KEY_LEFTSHIFT
+                        && matches!(configured, KeyCode::KEY_LEFTSHIFT | KeyCode::KEY_RIGHTSHIFT))
+        })
     }
 }
 
@@ -636,6 +631,9 @@ mod tests {
             keyboard.bindings().get(scd::ControllerButton::X),
             Some(KeyCode::KEY_BACKSPACE)
         );
+        state.set_active_bindings([scd::ControllerButton::X]);
+        assert!(keyboard.update(state, &sender));
+        assert!(keyboard.key_active(KeyCode::KEY_BACKSPACE));
 
         state.left.position[0] = -0.7;
         assert!(keyboard.update(state, &sender));
