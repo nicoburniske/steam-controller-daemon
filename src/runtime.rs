@@ -1,11 +1,9 @@
-use crate::config::{Config, ConfigError};
-use crate::device::{DeviceError, DeviceEvent, DeviceManager};
-use crate::ipc::{
-    ControlCommand, ControlReply, ControlRequest, EventPublisher, NamedEvent, Server, Status,
-};
-use crate::mapper::{Mapper, MapperError, Output};
-use crate::output::{OutputError, Outputs};
-use crate::protocol::Report;
+use crate::Result;
+use crate::config::Config;
+use crate::device::{DeviceEvent, DeviceManager};
+use crate::ipc::{EventPublisher, NamedEvent, Request, Response, Server, Status};
+use crate::mapper::{Mapper, Output};
+use crate::output::Outputs;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::thread;
@@ -16,20 +14,6 @@ pub struct Daemon {
     socket_path: PathBuf,
 }
 
-#[derive(Debug, thiserror::Error)]
-pub enum DaemonError {
-    #[error(transparent)]
-    Config(#[from] ConfigError),
-    #[error(transparent)]
-    Mapper(#[from] MapperError),
-    #[error(transparent)]
-    Device(#[from] DeviceError),
-    #[error(transparent)]
-    Output(#[from] OutputError),
-    #[error("could not start control socket: {0}")]
-    Socket(#[source] std::io::Error),
-}
-
 impl Daemon {
     pub fn new(config_path: impl AsRef<Path>, socket_path: impl AsRef<Path>) -> Self {
         Self {
@@ -38,14 +22,14 @@ impl Daemon {
         }
     }
 
-    pub fn run(self) -> Result<(), DaemonError> {
+    pub fn run(self) -> Result<()> {
         let config = Config::load(&self.config_path)?;
-        let mut mapper = Mapper::new(config)?;
+        let mut mapper = Mapper::new(config);
+        let mut mapped = Vec::new();
         let mut outputs = Outputs::new()?;
         let mut device = DeviceManager::new()?;
         let (command_sender, commands) = mpsc::sync_channel(32);
-        let (_server, events) =
-            Server::bind(&self.socket_path, command_sender).map_err(DaemonError::Socket)?;
+        let (_server, events) = Server::bind(&self.socket_path, command_sender)?;
         let mut battery = None;
         let mut charging = None;
         let mut last_lizard_refresh = Instant::now() - Duration::from_secs(4);
@@ -55,35 +39,74 @@ impl Daemon {
         log::info!("active mode: {}", mapper.active_mode());
         loop {
             while let Ok(command) = commands.try_recv() {
-                self.handle_control(
-                    command,
-                    &mut mapper,
-                    &mut outputs,
-                    &events,
-                    &device,
-                    battery,
-                    charging,
-                )?;
+                let response = match command.request {
+                    Request::Status => Response::Status {
+                        status: Status {
+                            connected: device.connected(),
+                            mode: mapper.active_mode().to_owned(),
+                            battery_percent: battery,
+                            charging,
+                            device: device.device_name(),
+                        },
+                    },
+                    Request::Mode => Response::Mode {
+                        name: mapper.active_mode().to_owned(),
+                    },
+                    Request::ModeSet { name } => match mapper.set_mode(&name, &mut mapped) {
+                        Ok(()) => {
+                            Self::emit(&mut mapped, &mut outputs, &events, &device)?;
+                            Response::Done
+                        }
+                        Err(error) => Response::Error {
+                            message: error.to_string(),
+                        },
+                    },
+                    Request::ModeNext => {
+                        mapper.next_mode(&mut mapped);
+                        Self::emit(&mut mapped, &mut outputs, &events, &device)?;
+                        Response::Done
+                    }
+                    Request::Reload => match Config::load(&self.config_path) {
+                        Ok(config) => match mapper.reload(config, &mut mapped) {
+                            Ok(()) => {
+                                Self::emit(&mut mapped, &mut outputs, &events, &device)?;
+                                Response::Done
+                            }
+                            Err(error) => Response::Error {
+                                message: error.to_string(),
+                            },
+                        },
+                        Err(error) => Response::Error {
+                            message: error.to_string(),
+                        },
+                    },
+                    Request::Events => unreachable!(),
+                };
+                let _ = command.reply.send(response);
             }
 
             let mut received = false;
             if let Some(event) = device.poll()? {
                 received = true;
                 match event {
-                    DeviceEvent::Report(Report::State(state)) => {
-                        Self::emit(mapper.process(&state), &mut outputs, &events, &device)?;
+                    DeviceEvent::State(state) => {
+                        mapper.process(&state, &mut mapped);
+                        Self::emit(&mut mapped, &mut outputs, &events, &device)?;
                     }
-                    DeviceEvent::Report(Report::Battery(state)) => {
-                        battery = Some(state.level_percent.min(100));
-                        charging = Some(state.charge_state.is_charging());
+                    DeviceEvent::Battery {
+                        percent,
+                        charging: is_charging,
+                    } => {
+                        battery = Some(percent);
+                        charging = Some(is_charging);
                     }
                     DeviceEvent::Disconnected => {
-                        Self::emit(mapper.release_all(), &mut outputs, &events, &device)?;
+                        mapper.release_all(&mut mapped);
+                        Self::emit(&mut mapped, &mut outputs, &events, &device)?;
                         battery = None;
                         charging = None;
                         log::info!("controller disconnected");
                     }
-                    DeviceEvent::Report(_) => {}
                 }
             }
 
@@ -105,64 +128,20 @@ impl Daemon {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn handle_control(
-        &self,
-        command: ControlCommand,
-        mapper: &mut Mapper,
-        outputs: &mut Outputs,
-        events: &EventPublisher,
-        device: &DeviceManager,
-        battery_percent: Option<u8>,
-        charging: Option<bool>,
-    ) -> Result<(), DaemonError> {
-        let reply = match command.request {
-            ControlRequest::Status => Ok(ControlReply::Status(Status {
-                connected: device.connected(),
-                mode: mapper.active_mode().to_owned(),
-                battery_percent,
-                charging,
-                device: device.device_name(),
-            })),
-            ControlRequest::Mode => Ok(ControlReply::Mode(mapper.active_mode().to_owned())),
-            ControlRequest::SetMode(name) => match mapper.set_mode(&name) {
-                Ok(mapped) => {
-                    Self::emit(mapped, outputs, events, device)?;
-                    Ok(ControlReply::Done)
-                }
-                Err(error) => Err(error.to_string()),
-            },
-            ControlRequest::NextMode => {
-                Self::emit(mapper.next_mode(), outputs, events, device)?;
-                Ok(ControlReply::Done)
-            }
-            ControlRequest::Reload => match Config::load(&self.config_path) {
-                Ok(config) => match mapper.reload(config) {
-                    Ok(mapped) => {
-                        Self::emit(mapped, outputs, events, device)?;
-                        Ok(ControlReply::Done)
-                    }
-                    Err(error) => Err(error.to_string()),
-                },
-                Err(error) => Err(error.to_string()),
-            },
-        };
-        let _ = command.reply.send(reply);
-        Ok(())
-    }
-
     fn emit(
-        mapped: Vec<Output>,
+        mapped: &mut Vec<Output>,
         outputs: &mut Outputs,
         events: &EventPublisher,
         device: &DeviceManager,
-    ) -> Result<(), DaemonError> {
-        for output in mapped {
-            match &output {
-                Output::Event { name } => events.publish(NamedEvent { name: name.clone() }),
+    ) -> Result<()> {
+        for output in mapped.drain(..) {
+            match output {
+                Output::Event { name } => {
+                    let _ = events.send(NamedEvent { name });
+                }
                 Output::ModeChanged { name } => log::info!("active mode: {name}"),
-                Output::TrackpadHaptic { pad } => device.trackpad_haptic(*pad)?,
-                _ => outputs.emit(&output)?,
+                Output::TrackpadHaptic { pad } => device.trackpad_haptic(pad)?,
+                output => outputs.emit(&output)?,
             }
         }
         Ok(())

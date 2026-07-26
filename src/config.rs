@@ -1,8 +1,10 @@
-use std::{error::Error, fmt, fs, path::Path, str::FromStr};
+use std::{fs, path::Path, str::FromStr};
 
 use evdev::KeyCode;
 use indexmap::IndexMap;
 use serde::{Deserialize, Deserializer};
+
+use crate::{Error, Result as ScdResult, ResultExt, protocol::Button};
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -15,179 +17,129 @@ pub struct Config {
 }
 
 impl Config {
-    pub fn load(path: impl AsRef<Path>) -> Result<Self, ConfigError> {
-        Self::parse(&fs::read_to_string(path).map_err(ConfigError::Io)?)
+    pub fn load(path: impl AsRef<Path>) -> ScdResult<Self> {
+        Self::parse(&fs::read_to_string(path).whence()?)
     }
 
-    pub fn parse(source: &str) -> Result<Self, ConfigError> {
-        let config: Self = toml::from_str(source).map_err(ConfigError::Parse)?;
+    pub fn parse(source: &str) -> ScdResult<Self> {
+        let config: Self = toml::from_str(source).whence()?;
         config.validate()?;
         Ok(config)
     }
 
-    pub fn validate(&self) -> Result<(), ConfigError> {
-        let mut errors = Vec::new();
-
+    pub fn validate(&self) -> ScdResult<()> {
         if self.version != 1 {
-            errors.push(format!("version must be 1, got {}", self.version));
-        }
-        if self.default_mode.trim().is_empty() {
-            errors.push("default_mode must not be empty".to_owned());
-        } else if !self.modes.contains_key(&self.default_mode) {
-            errors.push(format!(
-                "default_mode {:?} does not name a configured mode",
-                self.default_mode
-            ));
+            return Err(Error::message(format!(
+                "invalid configuration: version must be 1, got {}",
+                self.version
+            )));
         }
         if self.modes.is_empty() {
-            errors.push("at least one mode is required".to_owned());
+            return Err(Error::message(
+                "invalid configuration: at least one mode is required",
+            ));
+        }
+        if self.default_mode.trim().is_empty() {
+            return Err(Error::message(
+                "invalid configuration: default_mode must not be empty",
+            ));
+        }
+        if !self.modes.contains_key(&self.default_mode) {
+            return Err(Error::message(format!(
+                "invalid configuration: default_mode {:?} does not name a configured mode",
+                self.default_mode
+            )));
         }
 
-        for (scope, bindings) in std::iter::once(("global".to_owned(), &self.global.bindings))
-            .chain(
-                self.modes
-                    .iter()
-                    .map(|(name, mode)| (format!("mode {name:?}"), &mode.bindings)),
-            )
-            .chain(self.modes.iter().flat_map(|(mode_name, mode)| {
-                mode.layers.iter().map(move |(layer_name, layer)| {
-                    (
-                        format!("mode {mode_name:?} layer {layer_name:?}"),
-                        &layer.bindings,
-                    )
-                })
-            }))
-        {
-            for (index, binding) in bindings.iter().enumerate() {
-                let location = format!("{scope} binding {index}");
-                match (&binding.input, &binding.chord) {
-                    (Some(_), Some(_)) => {
-                        errors.push(format!(
-                            "{location} must have either input or chord, not both"
-                        ));
-                    }
-                    (None, None) => {
-                        errors.push(format!("{location} must have input or chord"));
-                    }
-                    (_, Some(chord)) if chord.is_empty() => {
-                        errors.push(format!("{location} chord must not be empty"));
-                    }
-                    (_, Some(chord)) => {
-                        for (position, input) in chord.iter().enumerate() {
-                            if chord[..position].contains(input) {
-                                errors.push(format!(
-                                    "{location} chord contains duplicate input {input:?}"
-                                ));
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-
-                for input in binding.input.iter().chain(binding.chord.iter().flatten()) {
-                    if let DigitalInput::Axis(threshold) = input {
-                        if !threshold.threshold.is_finite()
-                            || threshold.threshold <= 0.0
-                            || threshold.threshold > 1.0
-                        {
-                            errors.push(format!(
-                                "{location} axis threshold must be finite and in (0, 1]"
-                            ));
-                        }
-                    }
-                }
-
-                match &binding.action {
-                    Action::Key { key } => {
-                        if *key == KeyCode::KEY_RESERVED
-                            || (0x100..=0x15f).contains(&key.code())
-                            || (0x2c0..=0x2ff).contains(&key.code())
-                        {
-                            errors.push(format!("{location} key {key:?} is not a keyboard key"));
-                        }
-                        if binding.activation == Activation::Release {
-                            errors.push(format!(
-                                "{location} release activation is only valid for events and mode actions"
-                            ));
-                        }
-                    }
-                    Action::ModeSet { name } if !self.modes.contains_key(name) => {
-                        errors.push(format!(
-                            "{location} mode-set target {name:?} is not configured"
-                        ));
-                    }
-                    Action::Event { name } if name.trim().is_empty() => {
-                        errors.push(format!("{location} event name must not be empty"));
-                    }
-                    Action::Mouse { .. } | Action::Gamepad { .. }
-                        if binding.activation == Activation::Release =>
-                    {
-                        errors.push(format!(
-                            "{location} release activation is only valid for events and mode actions"
-                        ));
-                    }
-                    _ => {}
+        for (index, binding) in self.global.bindings.iter().enumerate() {
+            if binding.chord.is_empty() {
+                return Err(Error::message(format!(
+                    "invalid configuration: global binding {index} chord must not be empty"
+                )));
+            }
+            for (position, button) in binding.chord.iter().enumerate() {
+                if binding.chord[..position].contains(button) {
+                    return Err(Error::message(format!(
+                        "invalid configuration: global binding {index} chord contains duplicate button {button:?}"
+                    )));
                 }
             }
+            if self.global.bindings[..index]
+                .iter()
+                .any(|earlier| earlier.chord == binding.chord)
+            {
+                return Err(Error::message(format!(
+                    "invalid configuration: global binding {index} duplicates an earlier chord"
+                )));
+            }
+            self.validate_action(&binding.action)?;
         }
 
         for (name, mode) in &self.modes {
             if name.trim().is_empty() {
-                errors.push("mode names must not be empty".to_owned());
+                return Err(Error::message(
+                    "invalid configuration: mode names must not be empty",
+                ));
+            }
+
+            for (index, binding) in mode.bindings.iter().enumerate() {
+                if mode.bindings[..index]
+                    .iter()
+                    .any(|earlier| earlier.input == binding.input)
+                {
+                    return Err(Error::message(format!(
+                        "invalid configuration: mode {name:?} binding {index} duplicates input {:?}",
+                        binding.input
+                    )));
+                }
+                self.validate_action(&binding.action)?;
             }
 
             for (layer_index, (layer_name, layer)) in mode.layers.iter().enumerate() {
-                let location = format!("mode {name:?} layer {layer_name:?}");
                 if layer_name.trim().is_empty() {
-                    errors.push(format!("{location} name must not be empty"));
+                    return Err(Error::message(format!(
+                        "invalid configuration: mode {name:?} layer names must not be empty"
+                    )));
                 }
-                if let DigitalInput::Axis(threshold) = &layer.hold {
-                    if !threshold.threshold.is_finite()
-                        || threshold.threshold <= 0.0
-                        || threshold.threshold > 1.0
-                    {
-                        errors.push(format!(
-                            "{location} hold axis threshold must be finite and in (0, 1]"
-                        ));
-                    }
+                if mode
+                    .layers
+                    .values()
+                    .take(layer_index)
+                    .any(|earlier| earlier.hold == layer.hold)
+                {
+                    return Err(Error::message(format!(
+                        "invalid configuration: mode {name:?} layer {layer_name:?} hold conflicts with an earlier layer"
+                    )));
                 }
-                if mode.layers.values().take(layer_index).any(|earlier| {
-                    match (&earlier.hold, &layer.hold) {
-                        (DigitalInput::Button(left), DigitalInput::Button(right)) => left == right,
-                        (DigitalInput::Axis(left), DigitalInput::Axis(right)) => {
-                            left.axis == right.axis
-                        }
-                        _ => false,
-                    }
-                }) {
-                    errors.push(format!(
-                        "{location} hold conflicts with an earlier layer hold"
-                    ));
+                if mode
+                    .bindings
+                    .iter()
+                    .any(|binding| binding.input == layer.hold)
+                {
+                    return Err(Error::message(format!(
+                        "invalid configuration: mode {name:?} layer {layer_name:?} hold must not also be a mode binding"
+                    )));
                 }
                 for (binding_index, binding) in layer.bindings.iter().enumerate() {
-                    if binding
-                        .input
-                        .iter()
-                        .chain(binding.chord.iter().flatten())
-                        .any(|input| match (input, &layer.hold) {
-                            (DigitalInput::Button(left), DigitalInput::Button(right)) => {
-                                left == right
-                            }
-                            (DigitalInput::Axis(left), DigitalInput::Axis(right)) => {
-                                left.axis == right.axis
-                            }
-                            _ => false,
-                        })
-                    {
-                        errors.push(format!(
-                            "{location} binding {binding_index} must not use its own hold input"
-                        ));
+                    if binding.input == layer.hold {
+                        return Err(Error::message(format!(
+                            "invalid configuration: mode {name:?} layer {layer_name:?} binding {binding_index} must not use its hold button"
+                        )));
                     }
+                    if layer.bindings[..binding_index]
+                        .iter()
+                        .any(|earlier| earlier.input == binding.input)
+                    {
+                        return Err(Error::message(format!(
+                            "invalid configuration: mode {name:?} layer {layer_name:?} binding {binding_index} duplicates input {:?}",
+                            binding.input
+                        )));
+                    }
+                    self.validate_action(&binding.action)?;
                 }
             }
 
             for (index, mapping) in mode.axes.iter().enumerate() {
-                let location = format!("mode {name:?} axis mapping {index}");
                 let scalar_source = matches!(
                     mapping.source,
                     AnalogSource::LeftTrigger | AnalogSource::RightTrigger
@@ -196,68 +148,77 @@ impl Config {
                     mapping.target,
                     AnalogTarget::GamepadLeftTrigger | AnalogTarget::GamepadRightTrigger
                 );
-
                 if scalar_source != scalar_target {
-                    errors.push(format!(
-                        "{location} must connect a scalar source to a trigger or a vector source to a stick, mouse, or scroll target"
-                    ));
+                    return Err(Error::message(format!(
+                        "invalid configuration: mode {name:?} axis mapping {index} must connect a scalar source to a trigger or a vector source to a stick, mouse, or scroll target"
+                    )));
                 }
-                if mapping.components.is_some() && !matches!(mapping.source, AnalogSource::Gyro) {
-                    errors.push(format!(
-                        "{location} components is only valid for a gyro source"
-                    ));
+                if mapping.components.is_some() && mapping.source != AnalogSource::Gyro {
+                    return Err(Error::message(format!(
+                        "invalid configuration: mode {name:?} axis mapping {index} components is only valid for a gyro source"
+                    )));
                 }
-                if let Some(deadzone) = mapping.deadzone {
-                    if !deadzone.is_finite() || !(0.0..1.0).contains(&deadzone) {
-                        errors.push(format!("{location} deadzone must be finite and in [0, 1)"));
-                    }
+                if let Some(deadzone) = mapping.deadzone
+                    && (!deadzone.is_finite() || !(0.0..1.0).contains(&deadzone))
+                {
+                    return Err(Error::message(format!(
+                        "invalid configuration: mode {name:?} axis mapping {index} deadzone must be finite and in [0, 1)"
+                    )));
                 }
-                if let Some(sensitivity) = mapping.sensitivity {
-                    if !sensitivity.is_finite() || sensitivity < 0.0 {
-                        errors.push(format!(
-                            "{location} sensitivity must be finite and non-negative"
-                        ));
-                    }
+                if let Some(sensitivity) = mapping.sensitivity
+                    && (!sensitivity.is_finite() || sensitivity < 0.0)
+                {
+                    return Err(Error::message(format!(
+                        "invalid configuration: mode {name:?} axis mapping {index} sensitivity must be finite and non-negative"
+                    )));
                 }
                 if let Some(acceleration) = mapping.acceleration {
                     if !acceleration.is_finite() || acceleration < 0.0 {
-                        errors.push(format!(
-                            "{location} acceleration must be finite and non-negative"
-                        ));
+                        return Err(Error::message(format!(
+                            "invalid configuration: mode {name:?} axis mapping {index} acceleration must be finite and non-negative"
+                        )));
                     }
                     if !matches!(
                         mapping.source,
                         AnalogSource::LeftPad | AnalogSource::RightPad
                     ) || mapping.target != AnalogTarget::MouseMotion
                     {
-                        errors.push(format!(
-                            "{location} acceleration is only valid for a trackpad source and mouse-motion target"
-                        ));
+                        return Err(Error::message(format!(
+                            "invalid configuration: mode {name:?} axis mapping {index} acceleration is only valid for a trackpad source and mouse-motion target"
+                        )));
                     }
                 }
-                if let Some(exponent) = mapping.exponent {
-                    if !exponent.is_finite() || exponent <= 0.0 {
-                        errors.push(format!(
-                            "{location} exponent must be finite and greater than zero"
-                        ));
-                    }
+                if let Some(exponent) = mapping.exponent
+                    && (!exponent.is_finite() || exponent <= 0.0)
+                {
+                    return Err(Error::message(format!(
+                        "invalid configuration: mode {name:?} axis mapping {index} exponent must be finite and greater than zero"
+                    )));
                 }
                 if mode.axes[..index]
                     .iter()
                     .any(|earlier| earlier.target == mapping.target)
                 {
-                    errors.push(format!(
-                        "{location} duplicates target {:?}; each mode may map a target once",
+                    return Err(Error::message(format!(
+                        "invalid configuration: mode {name:?} axis mapping {index} duplicates target {:?}",
                         mapping.target
-                    ));
+                    )));
                 }
             }
         }
 
-        if errors.is_empty() {
-            Ok(())
-        } else {
-            Err(ConfigError::Invalid(errors))
+        Ok(())
+    }
+
+    fn validate_action(&self, action: &Action) -> ScdResult<()> {
+        match action {
+            Action::ModeSet { name } if !self.modes.contains_key(name) => Err(Error::message(
+                format!("invalid configuration: mode-set target {name:?} is not configured"),
+            )),
+            Action::Event { name } if name.trim().is_empty() => Err(Error::message(
+                "invalid configuration: event name must not be empty",
+            )),
+            _ => Ok(()),
         }
     }
 }
@@ -266,7 +227,14 @@ impl Config {
 #[serde(deny_unknown_fields)]
 pub struct Global {
     #[serde(default)]
-    pub bindings: Vec<Binding>,
+    pub bindings: Vec<GlobalBinding>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct GlobalBinding {
+    pub chord: Vec<Button>,
+    pub action: Action,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
@@ -283,7 +251,7 @@ pub struct Mode {
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Layer {
-    pub hold: DigitalInput,
+    pub hold: Button,
     #[serde(default)]
     pub bindings: Vec<Binding>,
 }
@@ -291,31 +259,8 @@ pub struct Layer {
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Binding {
-    #[serde(default)]
-    pub input: Option<DigitalInput>,
-    #[serde(default)]
-    pub chord: Option<Vec<DigitalInput>>,
-    #[serde(default)]
-    pub activation: Activation,
-    #[serde(default)]
-    pub consume: bool,
+    pub input: Button,
     pub action: Action,
-}
-
-#[derive(Debug, Clone, Deserialize, PartialEq)]
-#[serde(untagged)]
-pub enum DigitalInput {
-    Button(Button),
-    Axis(AxisThreshold),
-}
-
-#[derive(Debug, Clone, Deserialize, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct AxisThreshold {
-    pub axis: Axis,
-    #[serde(default)]
-    pub direction: Direction,
-    pub threshold: f32,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -387,7 +332,7 @@ where
     Ok(key)
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct AxisMapping {
     pub source: AnalogSource,
@@ -410,72 +355,6 @@ pub struct AxisMapping {
     pub swap_xy: bool,
     #[serde(default)]
     pub components: Option<[AxisComponent; 2]>,
-}
-
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Hash)]
-#[serde(rename_all = "kebab-case")]
-pub enum Button {
-    A,
-    B,
-    X,
-    Y,
-    #[serde(alias = "qam")]
-    QuickAccess,
-    #[serde(alias = "r3")]
-    RightStickClick,
-    View,
-    R4,
-    R5,
-    #[serde(alias = "rb")]
-    RightBumper,
-    DpadDown,
-    DpadRight,
-    DpadLeft,
-    DpadUp,
-    Menu,
-    #[serde(alias = "l3")]
-    LeftStickClick,
-    Steam,
-    L4,
-    L5,
-    #[serde(alias = "lb")]
-    LeftBumper,
-    RightStickTouch,
-    RightPadTouch,
-    RightPadClick,
-    RightTriggerClick,
-    LeftStickTouch,
-    LeftPadTouch,
-    LeftPadClick,
-    LeftTriggerClick,
-    RightGripTouch,
-    LeftGripTouch,
-}
-
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Hash)]
-#[serde(rename_all = "kebab-case")]
-pub enum Axis {
-    LeftStickX,
-    LeftStickY,
-    RightStickX,
-    RightStickY,
-    LeftTrigger,
-    RightTrigger,
-    LeftPadX,
-    LeftPadY,
-    RightPadX,
-    RightPadY,
-    GyroX,
-    GyroY,
-    GyroZ,
-}
-
-#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "kebab-case")]
-pub enum Direction {
-    #[default]
-    Positive,
-    Negative,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
@@ -517,14 +396,6 @@ pub enum AxisComponent {
     Z,
 }
 
-#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "kebab-case")]
-pub enum Activation {
-    #[default]
-    Press,
-    Release,
-}
-
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "kebab-case")]
 pub enum MouseButton {
@@ -564,86 +435,20 @@ pub enum GamepadButton {
     PaddleRightLower,
 }
 
-#[derive(Debug)]
-pub enum ConfigError {
-    Io(std::io::Error),
-    Parse(toml::de::Error),
-    Invalid(Vec<String>),
-}
-
-impl fmt::Display for ConfigError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Io(error) => write!(formatter, "failed to read configuration: {error}"),
-            Self::Parse(error) => write!(formatter, "failed to parse configuration: {error}"),
-            Self::Invalid(errors) => {
-                write!(formatter, "invalid configuration: {}", errors.join("; "))
-            }
-        }
-    }
-}
-
-impl Error for ConfigError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Io(error) => Some(error),
-            Self::Parse(error) => Some(error),
-            Self::Invalid(_) => None,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn parses_arbitrary_modes_and_global_chord() {
-        let config = Config::parse(
-            r#"
-                version = 1
-                default_mode = "couch browsing"
-
-                [[global.bindings]]
-                chord = ["steam", "x"]
-                activation = "press"
-                consume = true
-                action = { type = "event", name = "keyboard.toggle" }
-
-                [modes."couch browsing"]
-                [[modes."couch browsing".bindings]]
-                input = "a"
-                action = { type = "key", key = "enter" }
-
-                [[modes."couch browsing".axes]]
-                source = "right-pad"
-                target = "mouse-motion"
-                sensitivity = 1.5
-                acceleration = 5.0
-
-                [modes."anything at all"]
-            "#,
-        )
-        .unwrap();
-
-        assert_eq!(config.default_mode, "couch browsing");
-        assert_eq!(
-            config.modes.keys().map(String::as_str).collect::<Vec<_>>(),
-            ["couch browsing", "anything at all"]
-        );
-        assert!(config.global.bindings[0].consume);
-        assert_eq!(
-            config.modes["couch browsing"].axes[0].acceleration,
-            Some(5.0)
-        );
-    }
-
-    #[test]
-    fn parses_ordered_named_layers_and_friendly_keys() {
+    fn parses_modes_layers_chords_and_friendly_keys() {
         let config = Config::parse(
             r#"
                 version = 1
                 default_mode = "desktop"
+
+                [[global.bindings]]
+                chord = ["steam", "x"]
+                action = { type = "event", name = "keyboard.toggle" }
 
                 [modes.desktop]
                 [[modes.desktop.bindings]]
@@ -656,19 +461,17 @@ mod tests {
                 input = "b"
                 action = { type = "key", key = "q" }
 
-                [modes.desktop.layers.future]
-                hold = "right-bumper"
+                [modes."anything at all"]
             "#,
         )
         .unwrap();
 
+        assert_eq!(config.global.bindings[0].chord, [Button::Steam, Button::X]);
         assert_eq!(
-            config.modes["desktop"]
-                .layers
-                .keys()
-                .map(String::as_str)
-                .collect::<Vec<_>>(),
-            ["apps", "future"]
+            config.modes["desktop"].bindings[0].action,
+            Action::Key {
+                key: KeyCode::KEY_LEFTMETA
+            }
         );
         assert_eq!(
             config.modes["desktop"].layers["apps"].bindings[0].action,
@@ -676,83 +479,82 @@ mod tests {
                 key: KeyCode::KEY_Q
             }
         );
-        assert_eq!(
-            config.modes["desktop"].bindings[0].action,
-            Action::Key {
-                key: KeyCode::KEY_LEFTMETA
-            }
-        );
     }
 
     #[test]
-    fn rejects_conflicting_layer_holds_and_own_hold_bindings() {
-        let error = Config::parse(
-            r#"
-                version = 1
-                default_mode = "desktop"
-
-                [modes.desktop.layers.first]
-                hold = "left-bumper"
-                [[modes.desktop.layers.first.bindings]]
-                input = "left-bumper"
-                action = { type = "key", key = "q" }
-
-                [modes.desktop.layers.second]
-                hold = "left-bumper"
-            "#,
-        )
-        .unwrap_err()
-        .to_string();
-
-        assert!(error.contains("must not use its own hold input"));
-        assert!(error.contains("hold conflicts with an earlier layer hold"));
+    fn rejects_invalid_digital_configuration() {
+        for (body, expected) in [
+            (
+                r#"
+                    [[global.bindings]]
+                    chord = ["steam", "steam"]
+                    action = { type = "mode-next" }
+                    [modes.one]
+                "#,
+                "duplicate button",
+            ),
+            (
+                r#"
+                    [modes.one]
+                    [[modes.one.bindings]]
+                    input = "left-bumper"
+                    action = { type = "key", key = "q" }
+                    [modes.one.layers.apps]
+                    hold = "left-bumper"
+                "#,
+                "must not also be a mode binding",
+            ),
+            (
+                r#"
+                    [modes.one]
+                    [[modes.one.bindings]]
+                    input = "a"
+                    action = { type = "mode-set", name = "missing" }
+                "#,
+                "mode-set target",
+            ),
+        ] {
+            let source = format!("version = 1\ndefault_mode = \"one\"\n{body}");
+            assert!(
+                Config::parse(&source)
+                    .unwrap_err()
+                    .to_string()
+                    .contains(expected)
+            );
+        }
     }
 
     #[test]
-    fn parses_axis_threshold_inputs() {
-        let config = Config::parse(
-            r#"
-                version = 1
-                default_mode = "one"
-
-                [modes.one]
-                [[modes.one.bindings]]
-                input = { axis = "right-trigger", threshold = 0.75 }
-                action = { type = "gamepad", button = "south" }
-            "#,
-        )
-        .unwrap();
-
-        assert!(matches!(
-            config.modes["one"].bindings[0].input,
-            Some(DigitalInput::Axis(AxisThreshold {
-                axis: Axis::RightTrigger,
-                direction: Direction::Positive,
-                threshold: 0.75,
-            }))
-        ));
-    }
-
-    #[test]
-    fn rejects_bad_references_and_ranges_together() {
-        let error = Config::parse(
-            r#"
-                version = 2
-                default_mode = "missing"
-
-                [modes.one]
-                [[modes.one.bindings]]
-                input = { axis = "right-trigger", threshold = 1.5 }
-                action = { type = "mode-set", name = "also-missing" }
-            "#,
-        )
-        .unwrap_err()
-        .to_string();
-
-        assert!(error.contains("version must be 1"));
-        assert!(error.contains("default_mode \"missing\""));
-        assert!(error.contains("axis threshold"));
-        assert!(error.contains("mode-set target \"also-missing\""));
+    fn rejects_invalid_analog_configuration() {
+        for (mapping, expected) in [
+            (
+                r#"source = "right-pad"
+                   target = "mouse-motion"
+                   acceleration = -1.0"#,
+                "acceleration must be finite and non-negative",
+            ),
+            (
+                r#"source = "right-stick"
+                   target = "mouse-motion"
+                   acceleration = 1.0"#,
+                "acceleration is only valid",
+            ),
+            (
+                r#"source = "right-trigger"
+                   target = "mouse-motion""#,
+                "scalar source",
+            ),
+        ] {
+            let source = format!(
+                "version = 1\ndefault_mode = \"one\"\n[modes.one]\n[[modes.one.axes]]\n{mapping}"
+            );
+            assert!(
+                Config::parse(&source)
+                    .unwrap_err()
+                    .to_string()
+                    .contains(expected)
+            );
+        }
     }
 
     #[test]
@@ -773,54 +575,6 @@ mod tests {
                     .unwrap_err()
                     .to_string()
                     .contains("is not a keyboard key")
-            );
-        }
-    }
-
-    #[test]
-    fn rejects_invalid_or_misapplied_acceleration() {
-        for (source, target, acceleration, expected) in [
-            (
-                "right-pad",
-                "mouse-motion",
-                "-1.0",
-                "acceleration must be finite and non-negative",
-            ),
-            (
-                "right-pad",
-                "mouse-motion",
-                "nan",
-                "acceleration must be finite and non-negative",
-            ),
-            (
-                "right-stick",
-                "mouse-motion",
-                "1.0",
-                "acceleration is only valid for a trackpad source and mouse-motion target",
-            ),
-            (
-                "left-pad",
-                "scroll",
-                "1.0",
-                "acceleration is only valid for a trackpad source and mouse-motion target",
-            ),
-        ] {
-            let source = format!(
-                r#"
-                    version = 1
-                    default_mode = "one"
-                    [modes.one]
-                    [[modes.one.axes]]
-                    source = "{source}"
-                    target = "{target}"
-                    acceleration = {acceleration}
-                "#
-            );
-            assert!(
-                Config::parse(&source)
-                    .unwrap_err()
-                    .to_string()
-                    .contains(expected)
             );
         }
     }

@@ -3,11 +3,11 @@ use evdev::{
     AbsInfo, AbsoluteAxisCode, AttributeSet, BusType, EventSummary, EventType, FFEffectCode,
     FFEffectKind, InputEvent, InputId, KeyCode, RelativeAxisCode, UInputCode, UinputAbsSetup,
 };
-use std::collections::{BTreeMap, BTreeSet};
 use std::os::fd::AsRawFd;
 
 use crate::config::{GamepadButton, MouseButton};
 use crate::mapper::{GamepadAxis, Output};
+use crate::{Error, Result, ResultExt};
 
 pub struct Outputs {
     gamepad: VirtualDevice,
@@ -19,24 +19,13 @@ pub struct Outputs {
 }
 
 struct RumbleEffects {
-    effects: BTreeMap<i16, (u16, u16)>,
-    active: BTreeSet<i16>,
-    free_ids: BTreeSet<i16>,
+    effects: [Option<(u16, u16)>; 16],
+    active: u16,
     last_output: (u16, u16),
 }
 
-#[derive(Debug, thiserror::Error)]
-pub enum OutputError {
-    #[error("could not create virtual input device: {0}")]
-    Create(#[source] std::io::Error),
-    #[error("could not emit virtual input: {0}")]
-    Emit(#[source] std::io::Error),
-    #[error("'{0}' is not allowed on this virtual device")]
-    WrongDevice(String),
-}
-
 impl Outputs {
-    pub fn new() -> Result<Self, OutputError> {
+    pub fn new() -> Result<Self> {
         let mut keyboard_keys = AttributeSet::<KeyCode>::new();
         for code in 1..=0x2ff {
             if !(0x100..=0x15f).contains(&code) && !(0x2c0..=0x2ff).contains(&code) {
@@ -44,13 +33,13 @@ impl Outputs {
             }
         }
         let keyboard = VirtualDevice::builder()
-            .map_err(OutputError::Create)?
+            .whence()?
             .name("scd keyboard")
             .input_id(InputId::new(BusType::BUS_VIRTUAL, 0x1209, 0x5344, 1))
             .with_keys(&keyboard_keys)
-            .map_err(OutputError::Create)?
+            .whence()?
             .build()
-            .map_err(OutputError::Create)?;
+            .whence()?;
 
         let mouse_keys = AttributeSet::from_iter([
             KeyCode::BTN_LEFT,
@@ -69,15 +58,15 @@ impl Outputs {
             RelativeAxisCode::REL_HWHEEL,
         ]);
         let mouse = VirtualDevice::builder()
-            .map_err(OutputError::Create)?
+            .whence()?
             .name("scd mouse")
             .input_id(InputId::new(BusType::BUS_VIRTUAL, 0x1209, 0x5345, 1))
             .with_keys(&mouse_keys)
-            .map_err(OutputError::Create)?
+            .whence()?
             .with_relative_axes(&mouse_axes)
-            .map_err(OutputError::Create)?
+            .whence()?
             .build()
-            .map_err(OutputError::Create)?;
+            .whence()?;
 
         let gamepad_keys = AttributeSet::from_iter([
             KeyCode::BTN_SOUTH,
@@ -101,42 +90,38 @@ impl Outputs {
             KeyCode::BTN_TRIGGER_HAPPY2,
             KeyCode::BTN_TRIGGER_HAPPY3,
             KeyCode::BTN_TRIGGER_HAPPY4,
-            KeyCode::BTN_TRIGGER_HAPPY5,
-            KeyCode::BTN_TRIGGER_HAPPY6,
-            KeyCode::BTN_TRIGGER_HAPPY7,
-            KeyCode::BTN_TRIGGER_HAPPY8,
         ]);
         let stick = AbsInfo::new(0, -32768, 32767, 1024, 4096, 1);
         let trigger = AbsInfo::new(0, 0, 32767, 0, 256, 1);
         let gamepad = VirtualDevice::builder()
-            .map_err(OutputError::Create)?
+            .whence()?
             .name("scd gamepad")
             .input_id(InputId::new(BusType::BUS_VIRTUAL, 0x1209, 0x5343, 1))
             .with_keys(&gamepad_keys)
-            .map_err(OutputError::Create)?
+            .whence()?
             .with_absolute_axis(&UinputAbsSetup::new(AbsoluteAxisCode::ABS_X, stick))
-            .map_err(OutputError::Create)?
+            .whence()?
             .with_absolute_axis(&UinputAbsSetup::new(AbsoluteAxisCode::ABS_Y, stick))
-            .map_err(OutputError::Create)?
+            .whence()?
             .with_absolute_axis(&UinputAbsSetup::new(AbsoluteAxisCode::ABS_RX, stick))
-            .map_err(OutputError::Create)?
+            .whence()?
             .with_absolute_axis(&UinputAbsSetup::new(AbsoluteAxisCode::ABS_RY, stick))
-            .map_err(OutputError::Create)?
+            .whence()?
             .with_absolute_axis(&UinputAbsSetup::new(AbsoluteAxisCode::ABS_Z, trigger))
-            .map_err(OutputError::Create)?
+            .whence()?
             .with_absolute_axis(&UinputAbsSetup::new(AbsoluteAxisCode::ABS_RZ, trigger))
-            .map_err(OutputError::Create)?
+            .whence()?
             .with_ff(&AttributeSet::from_iter([FFEffectCode::FF_RUMBLE]))
-            .map_err(OutputError::Create)?
+            .whence()?
             .with_ff_effects_max(16)
             .build()
-            .map_err(OutputError::Create)?;
+            .whence()?;
         let flags = unsafe { libc::fcntl(gamepad.as_raw_fd(), libc::F_GETFL) };
         if flags < 0
             || unsafe { libc::fcntl(gamepad.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) }
                 < 0
         {
-            return Err(OutputError::Create(std::io::Error::last_os_error()));
+            return Err(Error::message(std::io::Error::last_os_error()));
         }
 
         Ok(Self {
@@ -149,20 +134,16 @@ impl Outputs {
         })
     }
 
-    pub fn emit(&mut self, command: &Output) -> Result<(), OutputError> {
+    pub fn emit(&mut self, command: &Output) -> Result<()> {
         match command {
-            Output::Key { key, pressed } => {
-                if (0x100..=0x15f).contains(&key.code()) || (0x2c0..=0x2ff).contains(&key.code()) {
-                    return Err(OutputError::WrongDevice(format!("{key:?}")));
-                }
-                self.keyboard
-                    .emit(&[InputEvent::new(
-                        EventType::KEY.0,
-                        key.code(),
-                        i32::from(*pressed),
-                    )])
-                    .map_err(OutputError::Emit)
-            }
+            Output::Key { key, pressed } => self
+                .keyboard
+                .emit(&[InputEvent::new(
+                    EventType::KEY.0,
+                    key.code(),
+                    i32::from(*pressed),
+                )])
+                .whence(),
             Output::MouseButton { button, pressed } => {
                 let code = match button {
                     MouseButton::Left => KeyCode::BTN_LEFT,
@@ -180,7 +161,7 @@ impl Outputs {
                         code.code(),
                         i32::from(*pressed),
                     )])
-                    .map_err(OutputError::Emit)
+                    .whence()
             }
             Output::GamepadButton { button, pressed } => {
                 let code = match button {
@@ -212,7 +193,7 @@ impl Outputs {
                         code.code(),
                         i32::from(*pressed),
                     )])
-                    .map_err(OutputError::Emit)
+                    .whence()
             }
             Output::GamepadAxis { axis, value } => {
                 let code = match axis {
@@ -230,7 +211,7 @@ impl Outputs {
                 };
                 self.gamepad
                     .emit(&[InputEvent::new(EventType::ABSOLUTE.0, code.0, value)])
-                    .map_err(OutputError::Emit)
+                    .whence()
             }
             Output::MouseMotion { x, y } => {
                 self.mouse_remainder.0 += x;
@@ -247,7 +228,7 @@ impl Outputs {
                         InputEvent::new(EventType::RELATIVE.0, RelativeAxisCode::REL_X.0, x),
                         InputEvent::new(EventType::RELATIVE.0, RelativeAxisCode::REL_Y.0, y),
                     ])
-                    .map_err(OutputError::Emit)
+                    .whence()
             }
             Output::Scroll { x, y } => {
                 self.scroll_remainder.0 += x;
@@ -264,7 +245,7 @@ impl Outputs {
                         InputEvent::new(EventType::RELATIVE.0, RelativeAxisCode::REL_HWHEEL.0, x),
                         InputEvent::new(EventType::RELATIVE.0, RelativeAxisCode::REL_WHEEL.0, y),
                     ])
-                    .map_err(OutputError::Emit)
+                    .whence()
             }
             Output::Event { .. } | Output::ModeChanged { .. } | Output::TrackpadHaptic { .. } => {
                 Ok(())
@@ -272,19 +253,16 @@ impl Outputs {
         }
     }
 
-    pub fn poll_rumble(&mut self) -> Result<Option<(u16, u16)>, OutputError> {
+    pub fn poll_rumble(&mut self) -> Result<Option<(u16, u16)>> {
         let events = match self.gamepad.fetch_events() {
             Ok(events) => events.collect::<Vec<_>>(),
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return Ok(None),
-            Err(error) => return Err(OutputError::Emit(error)),
+            Err(error) => return Err(Error::message(error)),
         };
         for event in events {
             match event.destructure() {
                 EventSummary::UInput(event, UInputCode::UI_FF_UPLOAD, ..) => {
-                    let mut upload = self
-                        .gamepad
-                        .process_ff_upload(event)
-                        .map_err(OutputError::Emit)?;
+                    let mut upload = self.gamepad.process_ff_upload(event).whence()?;
                     let effect = upload.effect();
                     let rumble = match effect.kind {
                         FFEffectKind::Rumble {
@@ -301,10 +279,7 @@ impl Outputs {
                     }
                 }
                 EventSummary::UInput(event, UInputCode::UI_FF_ERASE, ..) => {
-                    let erase = self
-                        .gamepad
-                        .process_ff_erase(event)
-                        .map_err(OutputError::Emit)?;
+                    let erase = self.gamepad.process_ff_erase(event).whence()?;
                     self.rumble.erase(erase.effect_id() as i16);
                 }
                 EventSummary::ForceFeedback(_, id, repetitions) => {
@@ -321,42 +296,54 @@ impl Outputs {
 impl RumbleEffects {
     fn new() -> Self {
         Self {
-            effects: BTreeMap::new(),
-            active: BTreeSet::new(),
-            free_ids: (0..16).collect(),
+            effects: [None; 16],
+            active: 0,
             last_output: (0, 0),
         }
     }
 
     fn upload(&mut self, requested_id: i16, effect: Option<(u16, u16)>) -> Option<i16> {
         let effect = effect?;
-        let id = if requested_id >= 0 {
-            requested_id
+        let index = if requested_id >= 0 {
+            let index = usize::try_from(requested_id).ok()?;
+            (index < self.effects.len()).then_some(index)?
         } else {
-            self.free_ids.pop_first()?
+            self.effects.iter().position(Option::is_none)?
         };
-        self.effects.insert(id, effect);
-        Some(id)
+        self.effects[index] = Some(effect);
+        Some(index as i16)
     }
 
     fn erase(&mut self, id: i16) {
-        self.effects.remove(&id);
-        self.active.remove(&id);
-        self.free_ids.insert(id);
+        let Ok(index) = usize::try_from(id) else {
+            return;
+        };
+        if index < self.effects.len() {
+            self.effects[index] = None;
+            self.active &= !(1 << index);
+        }
     }
 
     fn set_playback(&mut self, id: i16, repetitions: i32) {
+        let Ok(index) = usize::try_from(id) else {
+            return;
+        };
+        if index >= self.effects.len() {
+            return;
+        }
         if repetitions > 0 {
-            self.active.insert(id);
+            self.active |= 1 << index;
         } else if repetitions == 0 {
-            self.active.remove(&id);
+            self.active &= !(1 << index);
         }
     }
 
     fn changed_output(&mut self) -> Option<(u16, u16)> {
         let mut output = (0, 0);
-        for id in &self.active {
-            if let Some(effect) = self.effects.get(id) {
+        for (index, effect) in self.effects.iter().enumerate() {
+            if self.active & (1 << index) != 0
+                && let Some(effect) = effect
+            {
                 output.0 = output.0.max(effect.0);
                 output.1 = output.1.max(effect.1);
             }
@@ -372,16 +359,6 @@ impl RumbleEffects {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::str::FromStr;
-
-    #[test]
-    fn standard_key_names_parse() {
-        assert_eq!(KeyCode::from_str("KEY_ENTER").unwrap(), KeyCode::KEY_ENTER);
-        assert_eq!(
-            AbsoluteAxisCode::from_str("ABS_RX").unwrap(),
-            AbsoluteAxisCode::ABS_RX
-        );
-    }
 
     #[test]
     fn positive_repeat_counts_start_rumble_and_zero_stops_it() {

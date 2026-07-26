@@ -1,5 +1,5 @@
 use clap::{Parser, Subcommand};
-use scd::{Client, Config};
+use scd::{Client, Config, ResultExt};
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -35,7 +35,7 @@ enum ModeAction {
     Next,
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> scd::Result<()> {
     let args = Args::parse();
     if let Command::Validate { path } = args.command {
         Config::load(path)?;
@@ -45,7 +45,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let client = Client::new(args.socket);
     match args.command {
-        Command::Status { json: true } => println!("{}", serde_json::to_string(&client.status()?)?),
+        Command::Status { json: true } => {
+            println!("{}", serde_json::to_string(&client.status()?).whence()?)
+        }
         Command::Status { json: false } => {
             let status = client.status()?;
             println!("connected: {}", status.connected);
@@ -74,7 +76,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Command::Reload => client.reload()?,
         Command::Events => {
             for event in client.events()? {
-                println!("{}", serde_json::to_string(&event?)?);
+                println!("{}", serde_json::to_string(&event?).whence()?);
             }
         }
         Command::Validate { .. } => unreachable!(),

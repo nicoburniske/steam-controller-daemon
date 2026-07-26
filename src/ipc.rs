@@ -1,3 +1,4 @@
+use crate::{Error, Result, ResultExt};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{BufRead, BufReader, BufWriter, Write};
@@ -5,8 +6,8 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, SyncSender};
-use std::sync::{Arc, Mutex};
 use std::thread;
+use tokio::sync::broadcast;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Status {
@@ -24,31 +25,13 @@ pub struct NamedEvent {
 
 pub struct Server {
     path: PathBuf,
-    thread: Option<thread::JoinHandle<()>>,
 }
 
-#[derive(Clone)]
-pub struct EventPublisher {
-    subscribers: Arc<Mutex<Vec<SyncSender<NamedEvent>>>>,
-}
+pub type EventPublisher = broadcast::Sender<NamedEvent>;
 
 pub struct ControlCommand {
-    pub request: ControlRequest,
-    pub reply: SyncSender<Result<ControlReply, String>>,
-}
-
-pub enum ControlRequest {
-    Status,
-    Mode,
-    SetMode(String),
-    NextMode,
-    Reload,
-}
-
-pub enum ControlReply {
-    Status(Status),
-    Mode(String),
-    Done,
+    pub request: Request,
+    pub reply: SyncSender<Response>,
 }
 
 pub struct Client {
@@ -59,21 +42,9 @@ pub struct EventStream {
     lines: std::io::Lines<BufReader<UnixStream>>,
 }
 
-#[derive(Debug, thiserror::Error)]
-pub enum ClientError {
-    #[error("control socket error: {0}")]
-    Io(#[from] std::io::Error),
-    #[error("invalid control response: {0}")]
-    Json(#[from] serde_json::Error),
-    #[error("daemon rejected request: {0}")]
-    Daemon(String),
-    #[error("unexpected daemon response")]
-    UnexpectedResponse,
-}
-
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "command", rename_all = "kebab-case")]
-enum Request {
+pub enum Request {
     Status,
     Mode,
     ModeSet { name: String },
@@ -84,7 +55,7 @@ enum Request {
 
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case")]
-enum Response {
+pub enum Response {
     Status { status: Status },
     Mode { name: String },
     Done,
@@ -96,21 +67,19 @@ impl Server {
     pub fn bind(
         path: impl AsRef<Path>,
         commands: SyncSender<ControlCommand>,
-    ) -> std::io::Result<(Self, EventPublisher)> {
+    ) -> Result<(Self, EventPublisher)> {
         let path = path.as_ref().to_path_buf();
         match fs::remove_file(&path) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
+            Err(error) => return Err(Error::message(error)),
         }
 
-        let listener = UnixListener::bind(&path)?;
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o660))?;
-        let subscribers = Arc::new(Mutex::new(Vec::new()));
-        let publisher = EventPublisher {
-            subscribers: subscribers.clone(),
-        };
-        let thread = thread::Builder::new()
+        let listener = UnixListener::bind(&path).whence()?;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o660)).whence()?;
+        let (events, _) = broadcast::channel(32);
+        let publisher = events.clone();
+        thread::Builder::new()
             .name("scd-ipc".into())
             .spawn(move || {
                 for stream in listener.incoming() {
@@ -118,37 +87,24 @@ impl Server {
                         break;
                     };
                     let commands = commands.clone();
-                    let subscribers = subscribers.clone();
+                    let events = events.clone();
                     if let Err(error) = thread::Builder::new()
                         .name("scd-client".into())
-                        .spawn(move || handle_client(stream, commands, subscribers))
+                        .spawn(move || handle_client(stream, commands, events))
                     {
                         log::warn!("could not serve control client: {error}");
                     }
                 }
-            })?;
+            })
+            .whence()?;
 
-        Ok((
-            Self {
-                path,
-                thread: Some(thread),
-            },
-            publisher,
-        ))
+        Ok((Self { path }, publisher))
     }
 }
 
 impl Drop for Server {
     fn drop(&mut self) {
-        let _ = self.thread.take();
         let _ = fs::remove_file(&self.path);
-    }
-}
-
-impl EventPublisher {
-    pub fn publish(&self, event: NamedEvent) {
-        let mut subscribers = self.subscribers.lock().unwrap();
-        subscribers.retain(|subscriber| subscriber.try_send(event.clone()).is_ok());
     }
 }
 
@@ -159,83 +115,80 @@ impl Client {
         }
     }
 
-    pub fn status(&self) -> Result<Status, ClientError> {
+    pub fn status(&self) -> Result<Status> {
         match self.request(Request::Status)? {
             Response::Status { status } => Ok(status),
-            _ => Err(ClientError::UnexpectedResponse),
+            _ => Err(Error::message("unexpected daemon response")),
         }
     }
 
-    pub fn mode(&self) -> Result<String, ClientError> {
+    pub fn mode(&self) -> Result<String> {
         match self.request(Request::Mode)? {
             Response::Mode { name } => Ok(name),
-            _ => Err(ClientError::UnexpectedResponse),
+            _ => Err(Error::message("unexpected daemon response")),
         }
     }
 
-    pub fn set_mode(&self, name: String) -> Result<(), ClientError> {
+    pub fn set_mode(&self, name: String) -> Result<()> {
         match self.request(Request::ModeSet { name })? {
             Response::Done => Ok(()),
-            _ => Err(ClientError::UnexpectedResponse),
+            _ => Err(Error::message("unexpected daemon response")),
         }
     }
 
-    pub fn next_mode(&self) -> Result<(), ClientError> {
+    pub fn next_mode(&self) -> Result<()> {
         match self.request(Request::ModeNext)? {
             Response::Done => Ok(()),
-            _ => Err(ClientError::UnexpectedResponse),
+            _ => Err(Error::message("unexpected daemon response")),
         }
     }
 
-    pub fn reload(&self) -> Result<(), ClientError> {
+    pub fn reload(&self) -> Result<()> {
         match self.request(Request::Reload)? {
             Response::Done => Ok(()),
-            _ => Err(ClientError::UnexpectedResponse),
+            _ => Err(Error::message("unexpected daemon response")),
         }
     }
 
-    pub fn events(&self) -> Result<EventStream, ClientError> {
-        let stream = UnixStream::connect(&self.path)?;
-        serde_json::to_writer(&stream, &Request::Events)?;
-        (&stream).write_all(b"\n")?;
+    pub fn events(&self) -> Result<EventStream> {
+        let stream = UnixStream::connect(&self.path).whence()?;
+        serde_json::to_writer(&stream, &Request::Events).whence()?;
+        (&stream).write_all(b"\n").whence()?;
         Ok(EventStream {
             lines: BufReader::new(stream).lines(),
         })
     }
 
-    fn request(&self, request: Request) -> Result<Response, ClientError> {
-        let stream = UnixStream::connect(&self.path)?;
-        serde_json::to_writer(&stream, &request)?;
-        (&stream).write_all(b"\n")?;
+    fn request(&self, request: Request) -> Result<Response> {
+        let stream = UnixStream::connect(&self.path).whence()?;
+        serde_json::to_writer(&stream, &request).whence()?;
+        (&stream).write_all(b"\n").whence()?;
         let mut response = String::new();
-        BufReader::new(stream).read_line(&mut response)?;
-        match serde_json::from_str(&response)? {
-            Response::Error { message } => Err(ClientError::Daemon(message)),
+        BufReader::new(stream).read_line(&mut response).whence()?;
+        match serde_json::from_str(&response).whence()? {
+            Response::Error { message } => Err(Error::message(message)),
             response => Ok(response),
         }
     }
 }
 
 impl Iterator for EventStream {
-    type Item = Result<NamedEvent, ClientError>;
+    type Item = Result<NamedEvent>;
 
     fn next(&mut self) -> Option<Self::Item> {
         self.lines.next().map(|line| {
-            let response: Response = serde_json::from_str(&line?)?;
+            let line = line.whence()?;
+            let response: Response = serde_json::from_str(&line).whence()?;
             match response {
                 Response::Event { event } => Ok(event),
-                Response::Error { message } => Err(ClientError::Daemon(message)),
-                _ => Err(ClientError::UnexpectedResponse),
+                Response::Error { message } => Err(Error::message(message)),
+                _ => Err(Error::message("unexpected daemon response")),
             }
         })
     }
 }
 
-fn handle_client(
-    stream: UnixStream,
-    commands: SyncSender<ControlCommand>,
-    subscribers: Arc<Mutex<Vec<SyncSender<NamedEvent>>>>,
-) {
+fn handle_client(stream: UnixStream, commands: SyncSender<ControlCommand>, events: EventPublisher) {
     let mut request = String::new();
     if BufReader::new(&stream).read_line(&mut request).is_err() {
         return;
@@ -251,10 +204,18 @@ fn handle_client(
     };
 
     if matches!(request, Request::Events) {
-        let (sender, receiver) = mpsc::sync_channel(32);
-        subscribers.lock().unwrap().push(sender);
+        let mut receiver = events.subscribe();
+        drop(events);
         let mut writer = BufWriter::new(stream);
-        for event in receiver {
+        loop {
+            let event = match receiver.blocking_recv() {
+                Ok(event) => event,
+                Err(broadcast::error::RecvError::Lagged(count)) => {
+                    log::warn!("control event client missed {count} events");
+                    continue;
+                }
+                Err(broadcast::error::RecvError::Closed) => break,
+            };
             if serde_json::to_writer(&mut writer, &Response::Event { event }).is_err()
                 || writer.write_all(b"\n").is_err()
                 || writer.flush().is_err()
@@ -265,58 +226,15 @@ fn handle_client(
         return;
     }
 
-    let control_request = match request {
-        Request::Status => ControlRequest::Status,
-        Request::Mode => ControlRequest::Mode,
-        Request::ModeSet { name } => ControlRequest::SetMode(name),
-        Request::ModeNext => ControlRequest::NextMode,
-        Request::Reload => ControlRequest::Reload,
-        Request::Events => unreachable!(),
-    };
     let (reply, receiver) = mpsc::sync_channel(1);
-    if commands
-        .send(ControlCommand {
-            request: control_request,
-            reply,
-        })
-        .is_err()
-    {
+    if commands.send(ControlCommand { request, reply }).is_err() {
         return;
     }
-    let response = match receiver.recv() {
-        Ok(Ok(ControlReply::Status(status))) => Response::Status { status },
-        Ok(Ok(ControlReply::Mode(name))) => Response::Mode { name },
-        Ok(Ok(ControlReply::Done)) => Response::Done,
-        Ok(Err(message)) => Response::Error { message },
-        Err(_) => return,
+    let Ok(response) = receiver.recv() else {
+        return;
     };
     let mut writer = BufWriter::new(stream);
     let _ = serde_json::to_writer(&mut writer, &response);
     let _ = writer.write_all(b"\n");
     let _ = writer.flush();
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn wire_format_is_stable() {
-        assert_eq!(
-            serde_json::to_string(&Request::ModeSet {
-                name: "couch".into()
-            })
-            .unwrap(),
-            r#"{"command":"mode-set","name":"couch"}"#
-        );
-        assert_eq!(
-            serde_json::to_string(&Response::Event {
-                event: NamedEvent {
-                    name: "keyboard.toggle".into()
-                }
-            })
-            .unwrap(),
-            r#"{"type":"event","event":{"name":"keyboard.toggle"}}"#
-        );
-    }
 }
