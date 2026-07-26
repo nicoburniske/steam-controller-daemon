@@ -4,7 +4,6 @@ mod error;
 mod ipc;
 mod mapper;
 mod output;
-pub mod paths;
 mod protocol;
 mod runtime;
 
