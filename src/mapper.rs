@@ -1,5 +1,6 @@
 use std::{error::Error, fmt};
 
+use evdev::KeyCode;
 use indexmap::IndexMap;
 
 use crate::{
@@ -35,7 +36,7 @@ pub struct Mapper {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Output {
     Key {
-        code: String,
+        key: KeyCode,
         pressed: bool,
     },
     MouseButton {
@@ -138,20 +139,14 @@ impl Mapper {
             if binding.consume {
                 if pressed {
                     self.global_capture[index] = true;
-                } else if self.global_capture[index]
-                    && binding
-                        .input
-                        .iter()
-                        .chain(binding.chord.iter().flatten())
-                        .all(|input| !digital_active(input, state))
-                {
+                } else if self.global_capture[index] && binding_trigger_released(binding, state) {
                     self.global_capture[index] = false;
                 }
             }
 
             let should_apply = match binding.action {
                 Action::Key { .. } | Action::Mouse { .. } | Action::Gamepad { .. } => {
-                    active != was_active
+                    pressed || (was_active && !active)
                 }
                 _ => match binding.activation {
                     Activation::Press => pressed,
@@ -176,13 +171,18 @@ impl Mapper {
                     .enumerate()
                     .any(|(layer_index, layer)| {
                         let held = digital_active(&layer.hold, state);
-                        layer.bindings.iter().enumerate().any(
-                            |(binding_index, layer_binding)| {
-                                bindings_match(binding, layer_binding)
-                                    && (held
-                                        || self.layer_capture[layer_index][binding_index])
-                            },
-                        )
+                        (held
+                            && binding
+                                .input
+                                .iter()
+                                .chain(binding.chord.iter().flatten())
+                                .any(|input| inputs_conflict(input, &layer.hold)))
+                            || layer.bindings.iter().enumerate().any(
+                                |(binding_index, layer_binding)| {
+                                    bindings_match(binding, layer_binding)
+                                        && (held || self.layer_capture[layer_index][binding_index])
+                                },
+                            )
                     });
                 let globally_consumed = binding
                     .input
@@ -212,9 +212,8 @@ impl Mapper {
                             true,
                         )
                     });
-                let consumed = (layer_overridden && !was_active)
-                    || globally_consumed
-                    || mode_consumed;
+                let consumed =
+                    (layer_overridden && !was_active) || globally_consumed || mode_consumed;
                 let (active, pressed, released) = if consumed {
                     (false, false, false)
                 } else {
@@ -224,20 +223,14 @@ impl Mapper {
                 if binding.consume {
                     if pressed {
                         self.mode_capture[index] = true;
-                    } else if self.mode_capture[index]
-                        && binding
-                            .input
-                            .iter()
-                            .chain(binding.chord.iter().flatten())
-                            .all(|input| !digital_active(input, state))
-                    {
+                    } else if self.mode_capture[index] && binding_trigger_released(binding, state) {
                         self.mode_capture[index] = false;
                     }
                 }
 
                 let should_apply = match binding.action {
                     Action::Key { .. } | Action::Mouse { .. } | Action::Gamepad { .. } => {
-                        active != was_active
+                        pressed || (was_active && !active)
                     }
                     _ => match binding.activation {
                         Activation::Press => pressed,
@@ -367,18 +360,14 @@ impl Mapper {
                     if active {
                         self.layer_capture[layer_index][binding_index] = true;
                     } else if self.layer_capture[layer_index][binding_index]
-                        && binding
-                            .input
-                            .iter()
-                            .chain(binding.chord.iter().flatten())
-                            .all(|input| !digital_active(input, state))
+                        && binding_trigger_released(binding, state)
                     {
                         self.layer_capture[layer_index][binding_index] = false;
                     }
 
                     let should_apply = match binding.action {
                         Action::Key { .. } | Action::Mouse { .. } | Action::Gamepad { .. } => {
-                            active != was_active
+                            pressed || (was_active && !active)
                         }
                         _ => match binding.activation {
                             Activation::Press => pressed,
@@ -547,8 +536,8 @@ impl Mapper {
         outputs: &mut Vec<Output>,
     ) -> bool {
         match action {
-            Action::Key { code } => {
-                self.set_held(HeldOutput::Key(code.clone()), active, outputs);
+            Action::Key { key } => {
+                self.set_held(HeldOutput::Key(*key), active, outputs);
             }
             Action::Mouse { button } => {
                 self.set_held(HeldOutput::Mouse(*button), active, outputs);
@@ -614,8 +603,8 @@ impl Mapper {
                 return;
             }
             match &held {
-                HeldOutput::Key(code) => outputs.push(Output::Key {
-                    code: code.clone(),
+                HeldOutput::Key(key) => outputs.push(Output::Key {
+                    key: *key,
                     pressed: true,
                 }),
                 HeldOutput::Mouse(button) => outputs.push(Output::MouseButton {
@@ -640,8 +629,8 @@ impl Mapper {
         }
         self.held.shift_remove(&held);
         match held {
-            HeldOutput::Key(code) => outputs.push(Output::Key {
-                code,
+            HeldOutput::Key(key) => outputs.push(Output::Key {
+                key,
                 pressed: false,
             }),
             HeldOutput::Mouse(button) => outputs.push(Output::MouseButton {
@@ -666,8 +655,8 @@ impl Mapper {
     fn release_outputs(&mut self, outputs: &mut Vec<Output>) {
         for (held, _) in self.held.drain(..) {
             match held {
-                HeldOutput::Key(code) => outputs.push(Output::Key {
-                    code,
+                HeldOutput::Key(key) => outputs.push(Output::Key {
+                    key,
                     pressed: false,
                 }),
                 HeldOutput::Mouse(button) => outputs.push(Output::MouseButton {
@@ -708,7 +697,7 @@ impl Error for MapperError {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum HeldOutput {
-    Key(String),
+    Key(KeyCode),
     Mouse(MouseButton),
     Gamepad(GamepadButton),
 }
@@ -753,13 +742,23 @@ fn binding_transition(
     (active, ordered_press, was_active && !all_active)
 }
 
+fn binding_trigger_released(binding: &Binding, state: &ControllerState) -> bool {
+    binding
+        .input
+        .as_ref()
+        .or_else(|| binding.chord.as_ref().unwrap().last())
+        .is_some_and(|input| !digital_active(input, state))
+}
+
 fn input_is_consumed(
     input: &DigitalInput,
-    globals: &[Binding],
+    candidate: &Binding,
+    consumers: &[Binding],
     captures: &[bool],
     state: &ControllerState,
+    include_active_prefix: bool,
 ) -> bool {
-    for (index, binding) in globals
+    for (index, binding) in consumers
         .iter()
         .enumerate()
         .filter(|(_, binding)| binding.consume)
@@ -773,6 +772,9 @@ fn input_is_consumed(
         {
             return true;
         }
+        if !include_active_prefix {
+            continue;
+        }
         if let Some(global) = &binding.input {
             if digital_active(global, state) && inputs_conflict(input, global) {
                 return true;
@@ -780,16 +782,29 @@ fn input_is_consumed(
             continue;
         }
 
-        for global in binding.chord.as_ref().unwrap() {
+        let chord = binding.chord.as_ref().unwrap();
+        for (position, global) in chord.iter().enumerate() {
             if !digital_active(global, state) {
                 break;
             }
             if inputs_conflict(input, global) {
+                if candidate.consume
+                    && candidate.chord.as_ref().is_some_and(|candidate| {
+                        candidate.get(position) == Some(global)
+                            && candidate[..=position] == chord[..=position]
+                    })
+                {
+                    continue;
+                }
                 return true;
             }
         }
     }
     false
+}
+
+fn bindings_match(left: &Binding, right: &Binding) -> bool {
+    left.input == right.input && left.chord == right.chord
 }
 
 fn inputs_conflict(left: &DigitalInput, right: &DigitalInput) -> bool {
@@ -1141,10 +1156,10 @@ mod tests {
                 [modes.whatever]
                 [[modes.whatever.bindings]]
                 input = "steam"
-                action = { type = "key", code = "KEY_LEFTMETA" }
+                action = { type = "key", key = "super" }
                 [[modes.whatever.bindings]]
                 input = "x"
-                action = { type = "key", code = "KEY_X" }
+                action = { type = "key", key = "x" }
             "#,
         )
         .unwrap();
@@ -1167,14 +1182,14 @@ mod tests {
         assert_eq!(
             mapper.process(&state_with(&[ProtocolButton::X])),
             [Output::Key {
-                code: "KEY_X".to_owned(),
+                key: KeyCode::KEY_X,
                 pressed: true,
             }]
         );
         assert_eq!(
             mapper.process(&ControllerState::default()),
             [Output::Key {
-                code: "KEY_X".to_owned(),
+                key: KeyCode::KEY_X,
                 pressed: false,
             }]
         );
@@ -1201,10 +1216,10 @@ mod tests {
                 [[modes.desktop.bindings]]
                 chord = ["left-bumper", "dpad-up"]
                 consume = true
-                action = { type = "key", code = "KEY_PAGEUP" }
+                action = { type = "key", key = "page-up" }
                 [[modes.desktop.bindings]]
                 input = "dpad-up"
-                action = { type = "key", code = "KEY_UP" }
+                action = { type = "key", key = "up" }
             "#,
         )
         .unwrap();
@@ -1214,7 +1229,7 @@ mod tests {
         assert_eq!(
             mapper.process(&state_with(&[ProtocolButton::Lb, ProtocolButton::DpadUp])),
             [Output::Key {
-                code: "KEY_PAGEUP".to_owned(),
+                key: KeyCode::KEY_PAGEUP,
                 pressed: true,
             }]
         );
@@ -1225,7 +1240,7 @@ mod tests {
         assert_eq!(
             mapper.process(&state_with(&[ProtocolButton::Lb])),
             [Output::Key {
-                code: "KEY_PAGEUP".to_owned(),
+                key: KeyCode::KEY_PAGEUP,
                 pressed: false,
             }]
         );
@@ -1242,10 +1257,10 @@ mod tests {
                 [[modes.desktop.bindings]]
                 chord = ["left-bumper", "dpad-up"]
                 consume = true
-                action = { type = "key", code = "KEY_PAGEUP" }
+                action = { type = "key", key = "page-up" }
                 [[modes.desktop.bindings]]
                 input = "dpad-up"
-                action = { type = "key", code = "KEY_UP" }
+                action = { type = "key", key = "up" }
             "#,
         )
         .unwrap();
@@ -1256,7 +1271,7 @@ mod tests {
         assert_eq!(
             mapper.process(&state_with(&[ProtocolButton::DpadUp])),
             [Output::Key {
-                code: "KEY_PAGEUP".to_owned(),
+                key: KeyCode::KEY_PAGEUP,
                 pressed: false,
             }]
         );
@@ -1265,7 +1280,353 @@ mod tests {
         assert_eq!(
             mapper.process(&state_with(&[ProtocolButton::DpadUp])),
             [Output::Key {
-                code: "KEY_UP".to_owned(),
+                key: KeyCode::KEY_UP,
+                pressed: true,
+            }]
+        );
+    }
+
+    #[test]
+    fn layer_overrides_faces_inherits_unspecified_inputs_and_orders_modifiers_first() {
+        let config = Config::parse(
+            r#"
+                version = 1
+                default_mode = "desktop"
+
+                [modes.desktop]
+                [[modes.desktop.bindings]]
+                input = "l4"
+                action = { type = "key", key = "super" }
+                [[modes.desktop.bindings]]
+                input = "left-bumper"
+                action = { type = "key", key = "tab" }
+                [[modes.desktop.bindings]]
+                input = "a"
+                action = { type = "key", key = "enter" }
+                [[modes.desktop.bindings]]
+                input = "b"
+                action = { type = "key", key = "escape" }
+                [[modes.desktop.bindings]]
+                input = "y"
+                action = { type = "key", key = "space" }
+
+                [modes.desktop.layers.apps]
+                hold = "left-bumper"
+                [[modes.desktop.layers.apps.bindings]]
+                input = "b"
+                action = { type = "key", key = "q" }
+                [[modes.desktop.layers.apps.bindings]]
+                input = "y"
+                action = { type = "key", key = "o" }
+            "#,
+        )
+        .unwrap();
+        let mut mapper = Mapper::new(config.clone()).unwrap();
+
+        assert_eq!(
+            mapper.process(&state_with(&[
+                ProtocolButton::L4,
+                ProtocolButton::Lb,
+                ProtocolButton::B,
+            ])),
+            [
+                Output::Key {
+                    key: KeyCode::KEY_LEFTMETA,
+                    pressed: true,
+                },
+                Output::Key {
+                    key: KeyCode::KEY_Q,
+                    pressed: true,
+                },
+            ]
+        );
+        assert_eq!(
+            mapper.process(&state_with(&[
+                ProtocolButton::L4,
+                ProtocolButton::Lb,
+                ProtocolButton::B,
+                ProtocolButton::Y,
+            ])),
+            [Output::Key {
+                key: KeyCode::KEY_O,
+                pressed: true,
+            }]
+        );
+        assert_eq!(
+            mapper.process(&state_with(&[
+                ProtocolButton::L4,
+                ProtocolButton::Lb,
+                ProtocolButton::Y,
+            ])),
+            [Output::Key {
+                key: KeyCode::KEY_Q,
+                pressed: false,
+            }]
+        );
+
+        let mut mapper = Mapper::new(config).unwrap();
+        assert_eq!(mapper.process(&state_with(&[ProtocolButton::Lb])), []);
+        assert_eq!(
+            mapper.process(&state_with(&[ProtocolButton::Lb, ProtocolButton::A])),
+            [Output::Key {
+                key: KeyCode::KEY_ENTER,
+                pressed: true,
+            }]
+        );
+        assert_eq!(
+            mapper.process(&state_with(&[ProtocolButton::Lb])),
+            [Output::Key {
+                key: KeyCode::KEY_ENTER,
+                pressed: false,
+            }]
+        );
+    }
+
+    #[test]
+    fn layer_route_is_latched_until_the_face_releases() {
+        let config = Config::parse(
+            r#"
+                version = 1
+                default_mode = "desktop"
+
+                [modes.desktop]
+                [[modes.desktop.bindings]]
+                input = "b"
+                action = { type = "key", key = "escape" }
+
+                [modes.desktop.layers.apps]
+                hold = "left-bumper"
+                [[modes.desktop.layers.apps.bindings]]
+                input = "b"
+                action = { type = "key", key = "q" }
+            "#,
+        )
+        .unwrap();
+        let mut mapper = Mapper::new(config).unwrap();
+
+        assert_eq!(
+            mapper.process(&state_with(&[ProtocolButton::B])),
+            [Output::Key {
+                key: KeyCode::KEY_ESC,
+                pressed: true,
+            }]
+        );
+        assert_eq!(
+            mapper.process(&state_with(&[ProtocolButton::Lb, ProtocolButton::B])),
+            []
+        );
+        assert_eq!(mapper.process(&state_with(&[ProtocolButton::B])), []);
+        assert_eq!(
+            mapper.process(&ControllerState::default()),
+            [Output::Key {
+                key: KeyCode::KEY_ESC,
+                pressed: false,
+            }]
+        );
+        assert_eq!(
+            mapper.process(&state_with(&[ProtocolButton::Lb, ProtocolButton::B])),
+            [Output::Key {
+                key: KeyCode::KEY_Q,
+                pressed: true,
+            }]
+        );
+    }
+
+    #[test]
+    fn releasing_layer_hold_quarantines_the_face_until_release() {
+        let config = Config::parse(
+            r#"
+                version = 1
+                default_mode = "desktop"
+
+                [modes.desktop]
+                [[modes.desktop.bindings]]
+                input = "b"
+                action = { type = "key", key = "escape" }
+
+                [modes.desktop.layers.apps]
+                hold = "left-bumper"
+                [[modes.desktop.layers.apps.bindings]]
+                input = "b"
+                action = { type = "key", key = "q" }
+            "#,
+        )
+        .unwrap();
+        let mut mapper = Mapper::new(config).unwrap();
+
+        assert_eq!(
+            mapper.process(&state_with(&[ProtocolButton::Lb, ProtocolButton::B])),
+            [Output::Key {
+                key: KeyCode::KEY_Q,
+                pressed: true,
+            }]
+        );
+        assert_eq!(
+            mapper.process(&state_with(&[ProtocolButton::B])),
+            [Output::Key {
+                key: KeyCode::KEY_Q,
+                pressed: false,
+            }]
+        );
+        assert_eq!(mapper.process(&state_with(&[ProtocolButton::B])), []);
+        assert_eq!(mapper.process(&ControllerState::default()), []);
+        assert_eq!(
+            mapper.process(&state_with(&[ProtocolButton::B])),
+            [Output::Key {
+                key: KeyCode::KEY_ESC,
+                pressed: true,
+            }]
+        );
+    }
+
+    #[test]
+    fn global_consuming_chord_has_priority_over_a_layer() {
+        let config = Config::parse(
+            r#"
+                version = 1
+                default_mode = "desktop"
+
+                [[global.bindings]]
+                chord = ["steam", "x"]
+                consume = true
+                action = { type = "event", name = "keyboard.toggle" }
+
+                [modes.desktop]
+                [[modes.desktop.bindings]]
+                input = "x"
+                action = { type = "key", key = "g" }
+
+                [modes.desktop.layers.apps]
+                hold = "left-bumper"
+                [[modes.desktop.layers.apps.bindings]]
+                input = "x"
+                action = { type = "key", key = "t" }
+            "#,
+        )
+        .unwrap();
+        let mut mapper = Mapper::new(config).unwrap();
+
+        mapper.process(&state_with(&[ProtocolButton::Steam, ProtocolButton::Lb]));
+        assert_eq!(
+            mapper.process(&state_with(&[
+                ProtocolButton::Steam,
+                ProtocolButton::Lb,
+                ProtocolButton::X,
+            ])),
+            [Output::Event {
+                name: "keyboard.toggle".to_owned(),
+            }]
+        );
+        assert_eq!(
+            mapper.process(&state_with(&[ProtocolButton::Lb, ProtocolButton::X])),
+            []
+        );
+        assert_eq!(mapper.process(&state_with(&[ProtocolButton::Lb])), []);
+        assert_eq!(
+            mapper.process(&state_with(&[ProtocolButton::Lb, ProtocolButton::X])),
+            [Output::Key {
+                key: KeyCode::KEY_T,
+                pressed: true,
+            }]
+        );
+    }
+
+    #[test]
+    fn simultaneous_layers_use_declaration_order_without_fallthrough() {
+        let config = Config::parse(
+            r#"
+                version = 1
+                default_mode = "desktop"
+
+                [modes.desktop]
+                [[modes.desktop.bindings]]
+                input = "b"
+                action = { type = "key", key = "escape" }
+
+                [modes.desktop.layers.apps]
+                hold = "left-bumper"
+                [[modes.desktop.layers.apps.bindings]]
+                input = "b"
+                action = { type = "key", key = "q" }
+
+                [modes.desktop.layers.navigation]
+                hold = "right-bumper"
+                [[modes.desktop.layers.navigation.bindings]]
+                input = "b"
+                action = { type = "key", key = "o" }
+            "#,
+        )
+        .unwrap();
+        let mut mapper = Mapper::new(config).unwrap();
+
+        assert_eq!(
+            mapper.process(&state_with(&[
+                ProtocolButton::Lb,
+                ProtocolButton::Rb,
+                ProtocolButton::B,
+            ])),
+            [Output::Key {
+                key: KeyCode::KEY_Q,
+                pressed: true,
+            }]
+        );
+        assert_eq!(
+            mapper.process(&state_with(&[ProtocolButton::Rb, ProtocolButton::B])),
+            [Output::Key {
+                key: KeyCode::KEY_Q,
+                pressed: false,
+            }]
+        );
+        assert_eq!(mapper.process(&state_with(&[ProtocolButton::Rb])), []);
+        assert_eq!(
+            mapper.process(&state_with(&[ProtocolButton::Rb, ProtocolButton::B])),
+            [Output::Key {
+                key: KeyCode::KEY_O,
+                pressed: true,
+            }]
+        );
+    }
+
+    #[test]
+    fn sibling_consuming_chords_reuse_a_held_prefix() {
+        let config = Config::parse(
+            r#"
+                version = 1
+                default_mode = "desktop"
+
+                [modes.desktop]
+                [[modes.desktop.bindings]]
+                chord = ["left-bumper", "dpad-up"]
+                consume = true
+                action = { type = "key", key = "page-up" }
+                [[modes.desktop.bindings]]
+                chord = ["left-bumper", "dpad-down"]
+                consume = true
+                action = { type = "key", key = "page-down" }
+            "#,
+        )
+        .unwrap();
+        let mut mapper = Mapper::new(config).unwrap();
+
+        assert_eq!(mapper.process(&state_with(&[ProtocolButton::Lb])), []);
+        assert_eq!(
+            mapper.process(&state_with(&[ProtocolButton::Lb, ProtocolButton::DpadDown])),
+            [Output::Key {
+                key: KeyCode::KEY_PAGEDOWN,
+                pressed: true,
+            }]
+        );
+        assert_eq!(
+            mapper.process(&state_with(&[ProtocolButton::Lb])),
+            [Output::Key {
+                key: KeyCode::KEY_PAGEDOWN,
+                pressed: false,
+            }]
+        );
+        assert_eq!(
+            mapper.process(&state_with(&[ProtocolButton::Lb, ProtocolButton::DpadUp])),
+            [Output::Key {
+                key: KeyCode::KEY_PAGEUP,
                 pressed: true,
             }]
         );
@@ -1314,7 +1675,7 @@ mod tests {
                 [modes.zebra]
                 [[modes.zebra.bindings]]
                 input = "a"
-                action = { type = "key", code = "KEY_ENTER" }
+                action = { type = "key", key = "enter" }
                 [modes.alpha]
             "#,
         )
@@ -1324,7 +1685,7 @@ mod tests {
         assert_eq!(
             mapper.process(&state_with(&[ProtocolButton::A])),
             [Output::Key {
-                code: "KEY_ENTER".to_owned(),
+                key: KeyCode::KEY_ENTER,
                 pressed: true,
             }]
         );
@@ -1332,7 +1693,7 @@ mod tests {
             mapper.next_mode(),
             [
                 Output::Key {
-                    code: "KEY_ENTER".to_owned(),
+                    key: KeyCode::KEY_ENTER,
                     pressed: false,
                 },
                 Output::ModeChanged {
@@ -1944,10 +2305,10 @@ mod tests {
                 [modes.one]
                 [[modes.one.bindings]]
                 input = "a"
-                action = { type = "key", code = "KEY_ENTER" }
+                action = { type = "key", key = "enter" }
                 [[modes.one.bindings]]
                 input = "b"
-                action = { type = "key", code = "KEY_ENTER" }
+                action = { type = "key", key = "enter" }
             "#,
         )
         .unwrap();
@@ -1956,7 +2317,7 @@ mod tests {
         assert_eq!(
             mapper.process(&state_with(&[ProtocolButton::A])),
             [Output::Key {
-                code: "KEY_ENTER".to_owned(),
+                key: KeyCode::KEY_ENTER,
                 pressed: true,
             }]
         );
@@ -1968,7 +2329,7 @@ mod tests {
         assert_eq!(
             mapper.process(&ControllerState::default()),
             [Output::Key {
-                code: "KEY_ENTER".to_owned(),
+                key: KeyCode::KEY_ENTER,
                 pressed: false,
             }]
         );

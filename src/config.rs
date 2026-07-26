@@ -2,7 +2,7 @@ use std::{error::Error, fmt, fs, path::Path, str::FromStr};
 
 use evdev::KeyCode;
 use indexmap::IndexMap;
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -98,20 +98,12 @@ impl Config {
                 }
 
                 match &binding.action {
-                    Action::Key { code } => {
-                        if code.trim().is_empty() {
-                            errors.push(format!("{location} key code must not be empty"));
-                        } else if let Ok(key) = KeyCode::from_str(code) {
-                            if key == KeyCode::KEY_RESERVED
-                                || (0x100..=0x15f).contains(&key.code())
-                                || (0x2c0..=0x2ff).contains(&key.code())
-                            {
-                                errors.push(format!(
-                                    "{location} key code {code:?} is not a keyboard key"
-                                ));
-                            }
-                        } else {
-                            errors.push(format!("{location} has unknown key code {code:?}"));
+                    Action::Key { key } => {
+                        if *key == KeyCode::KEY_RESERVED
+                            || (0x100..=0x15f).contains(&key.code())
+                            || (0x2c0..=0x2ff).contains(&key.code())
+                        {
+                            errors.push(format!("{location} key {key:?} is not a keyboard key"));
                         }
                         if binding.activation == Activation::Release {
                             errors.push(format!(
@@ -144,7 +136,7 @@ impl Config {
                 errors.push("mode names must not be empty".to_owned());
             }
 
-            for (layer_name, layer) in &mode.layers {
+            for (layer_index, (layer_name, layer)) in mode.layers.iter().enumerate() {
                 let location = format!("mode {name:?} layer {layer_name:?}");
                 if layer_name.trim().is_empty() {
                     errors.push(format!("{location} name must not be empty"));
@@ -156,6 +148,39 @@ impl Config {
                     {
                         errors.push(format!(
                             "{location} hold axis threshold must be finite and in (0, 1]"
+                        ));
+                    }
+                }
+                if mode.layers.values().take(layer_index).any(|earlier| {
+                    match (&earlier.hold, &layer.hold) {
+                        (DigitalInput::Button(left), DigitalInput::Button(right)) => left == right,
+                        (DigitalInput::Axis(left), DigitalInput::Axis(right)) => {
+                            left.axis == right.axis
+                        }
+                        _ => false,
+                    }
+                }) {
+                    errors.push(format!(
+                        "{location} hold conflicts with an earlier layer hold"
+                    ));
+                }
+                for (binding_index, binding) in layer.bindings.iter().enumerate() {
+                    if binding
+                        .input
+                        .iter()
+                        .chain(binding.chord.iter().flatten())
+                        .any(|input| match (input, &layer.hold) {
+                            (DigitalInput::Button(left), DigitalInput::Button(right)) => {
+                                left == right
+                            }
+                            (DigitalInput::Axis(left), DigitalInput::Axis(right)) => {
+                                left.axis == right.axis
+                            }
+                            _ => false,
+                        })
+                    {
+                        errors.push(format!(
+                            "{location} binding {binding_index} must not use its own hold input"
                         ));
                     }
                 }
@@ -296,12 +321,70 @@ pub struct AxisThreshold {
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum Action {
-    Key { code: String },
-    Mouse { button: MouseButton },
-    Gamepad { button: GamepadButton },
-    ModeSet { name: String },
+    Key {
+        #[serde(alias = "code", deserialize_with = "deserialize_key")]
+        key: KeyCode,
+    },
+    Mouse {
+        button: MouseButton,
+    },
+    Gamepad {
+        button: GamepadButton,
+    },
+    ModeSet {
+        name: String,
+    },
     ModeNext,
-    Event { name: String },
+    Event {
+        name: String,
+    },
+}
+
+fn deserialize_key<'de, D>(deserializer: D) -> Result<KeyCode, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let name = String::deserialize(deserializer)?;
+    let normalized = name.trim().to_ascii_lowercase();
+    let key = match normalized.as_str() {
+        "enter" | "return" => KeyCode::KEY_ENTER,
+        "escape" | "esc" => KeyCode::KEY_ESC,
+        "space" => KeyCode::KEY_SPACE,
+        "tab" => KeyCode::KEY_TAB,
+        "super" | "command" | "cmd" | "meta" => KeyCode::KEY_LEFTMETA,
+        "control" | "ctrl" => KeyCode::KEY_LEFTCTRL,
+        "shift" => KeyCode::KEY_LEFTSHIFT,
+        "alt" => KeyCode::KEY_LEFTALT,
+        "up" => KeyCode::KEY_UP,
+        "down" => KeyCode::KEY_DOWN,
+        "left" => KeyCode::KEY_LEFT,
+        "right" => KeyCode::KEY_RIGHT,
+        _ => {
+            let code = if normalized.starts_with("key_") || normalized.starts_with("btn_") {
+                normalized.to_ascii_uppercase()
+            } else {
+                format!(
+                    "KEY_{}",
+                    normalized
+                        .chars()
+                        .filter(|character| !matches!(character, '-' | '_'))
+                        .flat_map(char::to_uppercase)
+                        .collect::<String>()
+                )
+            };
+            KeyCode::from_str(&code)
+                .map_err(|_| serde::de::Error::custom(format!("unknown key {name:?}")))?
+        }
+    };
+    if key == KeyCode::KEY_RESERVED
+        || (0x100..=0x15f).contains(&key.code())
+        || (0x2c0..=0x2ff).contains(&key.code())
+    {
+        return Err(serde::de::Error::custom(format!(
+            "{name:?} is not a keyboard key"
+        )));
+    }
+    Ok(key)
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -530,7 +613,7 @@ mod tests {
                 [modes."couch browsing"]
                 [[modes."couch browsing".bindings]]
                 input = "a"
-                action = { type = "key", code = "KEY_ENTER" }
+                action = { type = "key", key = "enter" }
 
                 [[modes."couch browsing".axes]]
                 source = "right-pad"
@@ -553,6 +636,76 @@ mod tests {
             config.modes["couch browsing"].axes[0].acceleration,
             Some(5.0)
         );
+    }
+
+    #[test]
+    fn parses_ordered_named_layers_and_friendly_keys() {
+        let config = Config::parse(
+            r#"
+                version = 1
+                default_mode = "desktop"
+
+                [modes.desktop]
+                [[modes.desktop.bindings]]
+                input = "l4"
+                action = { type = "key", key = "super" }
+
+                [modes.desktop.layers.apps]
+                hold = "left-bumper"
+                [[modes.desktop.layers.apps.bindings]]
+                input = "b"
+                action = { type = "key", key = "q" }
+
+                [modes.desktop.layers.future]
+                hold = "right-bumper"
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            config.modes["desktop"]
+                .layers
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["apps", "future"]
+        );
+        assert_eq!(
+            config.modes["desktop"].layers["apps"].bindings[0].action,
+            Action::Key {
+                key: KeyCode::KEY_Q
+            }
+        );
+        assert_eq!(
+            config.modes["desktop"].bindings[0].action,
+            Action::Key {
+                key: KeyCode::KEY_LEFTMETA
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_conflicting_layer_holds_and_own_hold_bindings() {
+        let error = Config::parse(
+            r#"
+                version = 1
+                default_mode = "desktop"
+
+                [modes.desktop.layers.first]
+                hold = "left-bumper"
+                [[modes.desktop.layers.first.bindings]]
+                input = "left-bumper"
+                action = { type = "key", key = "q" }
+
+                [modes.desktop.layers.second]
+                hold = "left-bumper"
+            "#,
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("must not use its own hold input"));
+        assert!(error.contains("hold conflicts with an earlier layer hold"));
     }
 
     #[test]
@@ -612,7 +765,7 @@ mod tests {
                     [modes.one]
                     [[modes.one.bindings]]
                     input = "a"
-                    action = {{ type = "key", code = "{code}" }}
+                    action = {{ type = "key", key = "{code}" }}
                 "#
             );
             assert!(

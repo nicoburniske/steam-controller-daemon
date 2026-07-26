@@ -5,7 +5,6 @@ use evdev::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::os::fd::AsRawFd;
-use std::str::FromStr;
 
 use crate::config::{GamepadButton, MouseButton};
 use crate::mapper::{GamepadAxis, Output};
@@ -32,8 +31,6 @@ pub enum OutputError {
     Create(#[source] std::io::Error),
     #[error("could not emit virtual input: {0}")]
     Emit(#[source] std::io::Error),
-    #[error("unknown evdev code '{0}'")]
-    UnknownCode(String),
     #[error("'{0}' is not allowed on this virtual device")]
     WrongDevice(String),
 }
@@ -154,17 +151,14 @@ impl Outputs {
 
     pub fn emit(&mut self, command: &Output) -> Result<(), OutputError> {
         match command {
-            Output::Key { code, pressed } => {
-                let code =
-                    KeyCode::from_str(code).map_err(|_| OutputError::UnknownCode(code.clone()))?;
-                if (0x100..=0x15f).contains(&code.code()) || (0x2c0..=0x2ff).contains(&code.code())
-                {
-                    return Err(OutputError::WrongDevice(format!("{code:?}")));
+            Output::Key { key, pressed } => {
+                if (0x100..=0x15f).contains(&key.code()) || (0x2c0..=0x2ff).contains(&key.code()) {
+                    return Err(OutputError::WrongDevice(format!("{key:?}")));
                 }
                 self.keyboard
                     .emit(&[InputEvent::new(
                         EventType::KEY.0,
-                        code.code(),
+                        key.code(),
                         i32::from(*pressed),
                     )])
                     .map_err(OutputError::Emit)
@@ -378,6 +372,7 @@ impl RumbleEffects {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::str::FromStr;
 
     #[test]
     fn standard_key_names_parse() {
