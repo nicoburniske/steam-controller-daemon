@@ -117,17 +117,13 @@ impl KeyboardRenderer {
             let pointers = [Half::Left, Half::Right].map(|half| {
                 (
                     half,
-                    keyboard.pointer(half).map(|position| LogicalPoint {
-                        x: grid.x
-                            + grid.width
-                                * ((position[0].clamp(-1.0, 1.0) + 1.0) * 0.25
-                                    + if half == Half::Left { 0.0 } else { 0.5 })
-                                .min(1.0 - f32::EPSILON),
-                        y: grid.y
-                            + grid.height
-                                * ((position[1].clamp(-1.0, 1.0) + 1.0) * 0.5)
-                                    .min(1.0 - f32::EPSILON),
-                    }),
+                    keyboard
+                        .pointer(half)
+                        .and_then(|position| half.project(position))
+                        .map(|[x, y]| LogicalPoint {
+                            x: grid.x + grid.width * x,
+                            y: grid.y + grid.height * y,
+                        }),
                 )
             });
 

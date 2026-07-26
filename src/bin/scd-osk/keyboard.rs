@@ -15,6 +15,19 @@ pub enum Half {
     Right,
 }
 
+impl Half {
+    pub fn project(self, position: [f32; 2]) -> Option<[f32; 2]> {
+        if !position.into_iter().all(f32::is_finite) {
+            return None;
+        }
+        let center = if self == Self::Left { 0.25 } else { 0.75 };
+        Some([
+            center + position[0].clamp(-1.0, 1.0) * 0.3,
+            ((position[1].clamp(-1.0, 1.0) + 1.0) * 0.5).min(1.0 - f32::EPSILON),
+        ])
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Slot {
     pub row: u8,
@@ -390,18 +403,12 @@ fn hit(page: Page, half: Half, position: [f32; 2]) -> Option<Action> {
 }
 
 fn hit_slot(page: Page, half: Half, position: [f32; 2]) -> Option<Slot> {
-    if !position.into_iter().all(f32::is_finite) {
-        return None;
-    }
+    let [x, y] = half.project(position)?;
     let rows = rows(page);
-    let y = ((position[1].clamp(-1.0, 1.0) + 1.0) * 0.5 * rows.len() as f32)
-        .floor()
-        .min(rows.len() as f32 - 1.0) as usize;
+    let y = (y * rows.len() as f32).floor().min(rows.len() as f32 - 1.0) as usize;
     let row = rows[y];
     let total_weight = row.iter().map(|key| u32::from(key.weight)).sum::<u32>();
-    let target = ((position[0].clamp(-1.0, 1.0) + 1.0) * 0.25
-        + if half == Half::Left { 0.0 } else { 0.5 })
-        * total_weight as f32;
+    let target = x * total_weight as f32;
     let mut boundary = 0.0;
     for (key, spec) in row.iter().enumerate() {
         boundary += f32::from(spec.weight);
@@ -514,5 +521,22 @@ mod tests {
         assert_eq!(keyboard.pointer(Half::Left), Some([-0.7, -0.5]));
         assert!(keyboard.disconnect());
         assert_eq!(keyboard.pointer(Half::Left), None);
+    }
+
+    #[test]
+    fn pointer_halves_overlap() {
+        let left_outer = Half::Left.project([-1.0, -1.0]).unwrap();
+        let left_inner = Half::Left.project([1.0, 0.0]).unwrap();
+        let right_inner = Half::Right.project([-1.0, 0.0]).unwrap();
+        let right_outer = Half::Right.project([1.0, 1.0]).unwrap();
+        assert!((left_outer[0] + 0.05).abs() < f32::EPSILON);
+        assert!((left_inner[0] - 0.55).abs() < f32::EPSILON);
+        assert!((right_inner[0] - 0.45).abs() < f32::EPSILON);
+        assert!((right_outer[0] - 1.05).abs() < f32::EPSILON);
+        assert_eq!(
+            hit_slot(Page::Letters, Half::Left, [5.0 / 6.0, 0.0]),
+            hit_slot(Page::Letters, Half::Right, [-5.0 / 6.0, 0.0])
+        );
+        assert_eq!(Half::Left.project([f32::NAN, 0.0]), None);
     }
 }
