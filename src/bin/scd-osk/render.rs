@@ -244,10 +244,10 @@ impl KeyboardRenderer {
                         let mut clip = ui.begin_clip(key);
                         BoxShadow::new(
                             LogicalRect {
-                                x: key.x,
-                                y: key.y - 3.0,
-                                width: key.width,
-                                height: 4.0,
+                                x: key.x - 10.0,
+                                y: key.y - 8.0,
+                                width: key.width + 20.0,
+                                height: 10.0,
                             },
                             Color::from_rgba8(
                                 shadow.red,
@@ -256,7 +256,7 @@ impl KeyboardRenderer {
                                 (shadow.alpha as f32 * press * (230.0 / 255.0)).round() as u8,
                             ),
                         )
-                        .blur(6.0)
+                        .blur(10.0)
                         .render(&mut clip);
                     }
                     if let Some(secondary) = secondary {
