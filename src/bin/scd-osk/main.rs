@@ -1,5 +1,6 @@
 mod keyboard;
 mod render;
+mod theme;
 mod wayland;
 
 use clap::Parser;
@@ -8,11 +9,12 @@ use keyboard::Keyboard;
 use render::KeyboardRenderer;
 use scd::{ControllerButton, Error, OskPad, OskState, Result, ResultExt};
 use std::{
-    fs,
+    env, fs,
     io::{BufWriter, Write},
     path::{Path, PathBuf},
     sync::mpsc,
 };
+use theme::Theme;
 
 #[derive(Parser)]
 struct Args {
@@ -20,6 +22,8 @@ struct Args {
     socket: PathBuf,
     #[arg(long)]
     font: Option<PathBuf>,
+    #[arg(long)]
+    theme: Option<PathBuf>,
     #[arg(long)]
     preview: Option<PathBuf>,
     #[arg(long, default_value_t = 1920)]
@@ -31,9 +35,21 @@ struct Args {
 fn main() -> Result<()> {
     env_logger::init();
     let args = Args::parse();
+    let user_theme = env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
+        .map(|config| config.join("scd/osk.toml"));
+    let theme = if let Some(path) = args.theme.as_deref() {
+        Theme::load(path)?
+    } else if let Some(path) = user_theme.filter(|path| path.exists()) {
+        Theme::load(&path)?
+    } else {
+        Theme::default()
+    };
     let font_path = args
         .font
         .as_deref()
+        .or(theme.font.as_deref())
         .or_else(|| option_env!("SCD_OSK_FONT").map(Path::new))
         .ok_or_else(|| Error::message("pass --font or build with SCD_OSK_FONT"))?;
     let font = fs::read(font_path).whence()?.into_boxed_slice();
@@ -65,7 +81,7 @@ fn main() -> Result<()> {
             position: [0.25, 0.15],
         };
         keyboard.update(state, &keys);
-        let mut renderer = KeyboardRenderer::new(font, args.width, args.height, 1)?;
+        let mut renderer = KeyboardRenderer::new(font, theme, args.width, args.height, 1)?;
         renderer.render(&keyboard);
         let mut output = BufWriter::new(fs::File::create(preview).whence()?);
         write!(output, "P6\n{} {}\n255\n", args.width, args.height).whence()?;
@@ -78,5 +94,5 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    wayland::run(args.socket, font)
+    wayland::run(args.socket, font, theme)
 }

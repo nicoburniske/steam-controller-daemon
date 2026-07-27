@@ -36,6 +36,12 @@ in {
       default = true;
       description = "Whether to run the on-screen keyboard in the graphical session.";
     };
+
+    osk.font = lib.mkOption {
+      type = lib.types.nullOr lib.types.path;
+      default = null;
+      description = "Optional font file passed to the on-screen keyboard.";
+    };
   };
 
   config = lib.mkIf cfg.enable {
@@ -85,7 +91,9 @@ in {
         partOf = ["graphical-session.target"];
         after = ["graphical-session.target"];
         serviceConfig = {
-          ExecStart = "${lib.getExe' cfg.package "scd-osk"} --socket /run/scd/control.sock";
+          ExecStart =
+            "${lib.getExe' cfg.package "scd-osk"} --socket /run/scd/control.sock"
+            + lib.optionalString (cfg.osk.font != null) " --font ${cfg.osk.font}";
           Restart = "on-failure";
           RestartSec = "1s";
         };

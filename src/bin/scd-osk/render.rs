@@ -1,4 +1,5 @@
 use crate::keyboard::{Half, Keyboard};
+use crate::theme::{Theme, ThemeColors};
 use blit::{
     RepaintBuffer, Runtime,
     animation::Easing,
@@ -21,6 +22,7 @@ use std::time::{Duration, Instant};
 
 pub struct KeyboardRenderer {
     runtime: Runtime<BlitPlatform>,
+    theme: Theme,
     logical_size: [u32; 2],
     physical_size: [u32; 2],
     scale: u32,
@@ -40,14 +42,14 @@ enum ControllerHint {
 }
 
 impl KeyboardRenderer {
-    pub fn new(font: Box<[u8]>, width: u32, height: u32, scale: u32) -> Result<Self> {
+    pub fn new(font: Box<[u8]>, theme: Theme, width: u32, height: u32, scale: u32) -> Result<Self> {
         let [physical_width, physical_height] = scaled_size(width, height, scale)?;
         let renderer = Renderer::new(
             VecBuffer::new(physical_width as usize, physical_height as usize),
             RendererConfig {
                 fonts: vec![FontFace {
                     id: Default::default(),
-                    weight: 600,
+                    weight: theme.font_weight,
                     font: Font::from_owned(font).whence()?,
                 }],
                 font_metric_cache_capacity: 256,
@@ -60,6 +62,7 @@ impl KeyboardRenderer {
         .strategy(Scanline::default());
         Ok(Self {
             runtime: Runtime::new(BlitPlatform { renderer }),
+            theme,
             logical_size: [width, height],
             physical_size: [physical_width, physical_height],
             scale,
@@ -88,10 +91,12 @@ impl KeyboardRenderer {
 
     pub fn render(&mut self, keyboard: &Keyboard) {
         let time = self.started_at.elapsed();
+        let colors = &self.theme.colors;
+        let font_weight = self.theme.font_weight;
         self.runtime.render(time, Input::None, |ui| {
             let screen = ui.screen();
             blit::paint::Rectangle::new(screen)
-                .background(Color::from_rgba8(35, 38, 46, 255))
+                .background(colors.background.color())
                 .render(ui);
 
             let bindings = keyboard.bindings();
@@ -131,11 +136,11 @@ impl KeyboardRenderer {
                             && keyboard.pressed(*half)
                     });
                     let background = if hovered {
-                        Color::WHITE
+                        colors.hover.color()
                     } else if special && primary != "Space" {
-                        Color::BLACK
+                        colors.special.color()
                     } else {
-                        Color::from_rgba8(14, 20, 27, 255)
+                        colors.key.color()
                     };
                     let press = ui
                         .animate(
@@ -150,16 +155,25 @@ impl KeyboardRenderer {
                         )
                         .value()
                         .clamp(0.0, 1.0);
+                    let pressed_color = colors.pressed.color();
                     let background = Color::from_rgba8(
-                        (background.red as f32 * (1.0 - press) + 26.0 * press).round() as u8,
-                        (background.green as f32 * (1.0 - press) + 159.0 * press).round() as u8,
-                        (background.blue as f32 * (1.0 - press) + 255.0 * press).round() as u8,
-                        255,
+                        (background.red as f32 * (1.0 - press) + pressed_color.red as f32 * press)
+                            .round() as u8,
+                        (background.green as f32 * (1.0 - press)
+                            + pressed_color.green as f32 * press)
+                            .round() as u8,
+                        (background.blue as f32 * (1.0 - press) + pressed_color.blue as f32 * press)
+                            .round() as u8,
+                        (background.alpha as f32 * (1.0 - press)
+                            + pressed_color.alpha as f32 * press)
+                            .round() as u8,
                     );
                     let text = if hovered && press < 0.35 {
-                        Color::from_rgba8(14, 20, 27, 255)
+                        colors.key.color()
+                    } else if press >= 0.35 {
+                        colors.pressed_foreground.color()
                     } else {
-                        Color::WHITE
+                        colors.foreground.color()
                     };
                     let inset = 2.0;
                     let key = LogicalRect {
@@ -219,10 +233,11 @@ impl KeyboardRenderer {
                         .padding_x(if special { 10.0 } else { 2.0 })
                         .padding_y(if secondary.is_some() { 7.0 } else { 2.0 })
                         .text_size(if special { 17.0 } else { 22.0 })
-                        .text_weight(600)
+                        .text_weight(font_weight)
                         .text_options(text_options)
                         .render(ui, key);
                     if press > 0.0 {
+                        let shadow = colors.shadow.color();
                         let mut clip = ui.begin_clip(key);
                         BoxShadow::new(
                             LogicalRect {
@@ -231,7 +246,12 @@ impl KeyboardRenderer {
                                 width: key.width,
                                 height: 4.0,
                             },
-                            Color::from_rgba8(0, 0, 0, (press * 230.0).round() as u8),
+                            Color::from_rgba8(
+                                shadow.red,
+                                shadow.green,
+                                shadow.blue,
+                                (shadow.alpha as f32 * press * (230.0 / 255.0)).round() as u8,
+                            ),
                         )
                         .blur(6.0)
                         .render(&mut clip);
@@ -241,13 +261,13 @@ impl KeyboardRenderer {
                             .id((slot, "secondary"))
                             .background(Color::TRANSPARENT)
                             .text_color(if hovered && !pressed && !active {
-                                Color::from_rgba8(77, 82, 88, 255)
+                                colors.dim.color()
                             } else {
-                                Color::from_rgba8(139, 146, 154, 255)
+                                colors.muted.color()
                             })
                             .padding_y(0.0)
                             .text_size(14.0)
-                            .text_weight(600)
+                            .text_weight(font_weight)
                             .text_options(TextOptions {
                                 horizontal_align: HorizontalAlign::Center,
                                 vertical_align: VerticalAlign::Center,
@@ -267,6 +287,8 @@ impl KeyboardRenderer {
                         let hint_width = hint.width();
                         render_hint(
                             ui,
+                            colors,
+                            font_weight,
                             hint,
                             (slot, input),
                             LogicalRect {
@@ -298,7 +320,7 @@ impl KeyboardRenderer {
                     width: diameter,
                     height: diameter,
                 })
-                .background(Color::from_rgba8(79, 79, 79, 255))
+                .background(colors.hint_control.color())
                 .uniform_radius(diameter / 2.0)
                 .opacity(0.84)
                 .render(ui);
@@ -309,7 +331,7 @@ impl KeyboardRenderer {
                     width: center,
                     height: center,
                 })
-                .background(Color::from_rgba8(26, 159, 255, 255))
+                .background(colors.pressed.color())
                 .uniform_radius(center / 2.0)
                 .opacity(0.72)
                 .render(ui);
@@ -389,33 +411,36 @@ impl ControllerHint {
     }
 }
 
-fn render_hint(ui: &mut blit::Ui, hint: ControllerHint, id: impl Hash, area: LogicalRect) {
+fn render_hint(
+    ui: &mut blit::Ui,
+    colors: &ThemeColors,
+    font_weight: u16,
+    hint: ControllerHint,
+    id: impl Hash,
+    area: LogicalRect,
+) {
     let (label, background, text, radius, border) = match hint {
         ControllerHint::Face(label) => (
             label,
-            Color::from_rgba8(26, 159, 255, 255),
-            Color::WHITE,
+            colors.pressed.color(),
+            colors.pressed_foreground.color(),
             12.0,
             2.0,
         ),
-        ControllerHint::Trigger(label) => (
-            label,
-            Color::from_rgba8(222, 226, 232, 255),
-            Color::from_rgba8(14, 20, 27, 255),
-            4.0,
-            0.0,
-        ),
+        ControllerHint::Trigger(label) => {
+            (label, colors.hover.color(), colors.key.color(), 4.0, 0.0)
+        }
         ControllerHint::Paddle(label) => (
             label,
-            Color::from_rgba8(83, 91, 104, 255),
-            Color::WHITE,
+            colors.hint_paddle.color(),
+            colors.foreground.color(),
             4.0,
             0.0,
         ),
         ControllerHint::Control(label) => (
             label,
-            Color::from_rgba8(54, 60, 70, 255),
-            Color::WHITE,
+            colors.hint_control.color(),
+            colors.foreground.color(),
             4.0,
             0.0,
         ),
@@ -423,13 +448,13 @@ fn render_hint(ui: &mut blit::Ui, hint: ControllerHint, id: impl Hash, area: Log
     Button::new(label)
         .id(id)
         .background(background)
-        .border(border, Color::from_rgba8(14, 20, 27, 255))
+        .border(border, colors.key.color())
         .text_color(text)
         .uniform_radius(radius)
         .padding_x(0.0)
         .padding_y(0.0)
         .text_size(11.0)
-        .text_weight(600)
+        .text_weight(font_weight)
         .text_options(TextOptions {
             horizontal_align: HorizontalAlign::Center,
             vertical_align: VerticalAlign::Center,

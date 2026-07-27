@@ -39,7 +39,7 @@
         ];
         buildInputs = [pkgs.udev];
         RUSTC_BOOTSTRAP = "1";
-        SCD_OSK_FONT = "${pkgs.montserrat}/share/fonts/ttf/Montserrat-SemiBold.ttf";
+        SCD_OSK_FONT = "${pkgs.inter}/share/fonts/truetype/InterVariable.ttf";
       };
     });
 

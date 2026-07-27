@@ -1,6 +1,7 @@
 use crate::{
     keyboard::{Keyboard, KeyboardOutput},
     render::KeyboardRenderer,
+    theme::Theme,
 };
 use scd::{Client, OskState, Result, ResultExt};
 use smithay_client_toolkit::{
@@ -35,7 +36,7 @@ use std::{path::PathBuf, sync::mpsc, thread, time::Duration};
 const WIDTH: u32 = 1280;
 const HEIGHT: u32 = 360;
 
-pub fn run(socket: PathBuf, font: Box<[u8]>) -> Result<()> {
+pub fn run(socket: PathBuf, font: Box<[u8]>, theme: Theme) -> Result<()> {
     let connection = Connection::connect_to_env().whence()?;
     let (globals, event_queue) = registry_queue_init(&connection).whence()?;
     let qh = event_queue.handle();
@@ -116,7 +117,7 @@ pub fn run(socket: PathBuf, font: Box<[u8]>) -> Result<()> {
         layer,
         pool,
         buffer: None,
-        renderer: KeyboardRenderer::new(font, WIDTH, HEIGHT, 1)?,
+        renderer: KeyboardRenderer::new(font, theme, WIDTH, HEIGHT, 1)?,
         keyboard: Keyboard::default(),
         key_output,
         width: WIDTH,
