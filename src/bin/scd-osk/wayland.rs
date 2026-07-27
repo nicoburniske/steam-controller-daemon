@@ -241,7 +241,7 @@ impl State {
                         width as i32,
                         height as i32,
                         stride,
-                        wl_shm::Format::Xrgb8888,
+                        wl_shm::Format::Argb8888,
                     )
                     .whence()?
                     .0,
@@ -261,7 +261,7 @@ impl State {
                         width as i32,
                         height as i32,
                         stride,
-                        wl_shm::Format::Xrgb8888,
+                        wl_shm::Format::Argb8888,
                     )
                     .whence()?;
                 *buffer = next;
@@ -275,7 +275,7 @@ impl State {
             ));
         }
         for (target, pixel) in canvas.chunks_exact_mut(4).zip(pixels) {
-            target.copy_from_slice(&pixel.to_le_bytes());
+            target.copy_from_slice(&pixel.0.to_le_bytes());
         }
 
         self.layer
