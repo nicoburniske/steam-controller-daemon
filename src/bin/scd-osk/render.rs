@@ -52,7 +52,7 @@ impl KeyboardRenderer {
             RendererConfig {
                 fonts: vec![FontFace {
                     id: Default::default(),
-                    weight: theme.font_weight,
+                    weight: 400,
                     font: Font::from_owned(font).whence()?,
                 }],
                 font_metric_cache_capacity: 256,
@@ -95,7 +95,6 @@ impl KeyboardRenderer {
     pub fn render(&mut self, keyboard: &Keyboard) {
         let time = self.started_at.elapsed();
         let colors = &self.theme.colors;
-        let font_weight = self.theme.font_weight;
         self.runtime.render(time, Input::None, |ui| {
             let screen = ui.screen();
             blit::paint::Rectangle::new(screen)
@@ -238,7 +237,6 @@ impl KeyboardRenderer {
                         .padding_x(if special { 10.0 } else { 2.0 })
                         .padding_y(if secondary.is_some() { 7.0 } else { 2.0 })
                         .text_size(if special { 17.0 } else { 22.0 })
-                        .text_weight(font_weight)
                         .text_options(text_options)
                         .render(ui, key);
                     if press > 0.0 {
@@ -272,7 +270,6 @@ impl KeyboardRenderer {
                             })
                             .padding_y(0.0)
                             .text_size(14.0)
-                            .text_weight(font_weight)
                             .text_options(TextOptions {
                                 horizontal_align: HorizontalAlign::Center,
                                 vertical_align: VerticalAlign::Center,
@@ -293,7 +290,6 @@ impl KeyboardRenderer {
                         render_hint(
                             ui,
                             colors,
-                            font_weight,
                             hint,
                             (slot, input),
                             LogicalRect {
@@ -419,7 +415,6 @@ impl ControllerHint {
 fn render_hint(
     ui: &mut blit::Ui,
     colors: &ThemeColors,
-    font_weight: u16,
     hint: ControllerHint,
     id: impl Hash,
     area: LogicalRect,
@@ -459,7 +454,6 @@ fn render_hint(
         .padding_x(0.0)
         .padding_y(0.0)
         .text_size(11.0)
-        .text_weight(font_weight)
         .text_options(TextOptions {
             horizontal_align: HorizontalAlign::Center,
             vertical_align: VerticalAlign::Center,

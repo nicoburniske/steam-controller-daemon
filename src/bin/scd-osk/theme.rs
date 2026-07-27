@@ -1,13 +1,12 @@
 use blit::color::Color;
-use scd::{Error, Result, ResultExt};
+use scd::{Result, ResultExt};
 use serde::{Deserialize, Deserializer};
 use std::{fs, path::Path, path::PathBuf};
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Theme {
     pub font: Option<PathBuf>,
-    pub font_weight: u16,
     pub colors: ThemeColors,
 }
 
@@ -34,21 +33,7 @@ pub struct ThemeColor([u8; 4]);
 
 impl Theme {
     pub fn load(path: &Path) -> Result<Self> {
-        let theme: Self = toml::from_str(&fs::read_to_string(path).whence()?).whence()?;
-        if !(1..=1000).contains(&theme.font_weight) {
-            return Err(Error::message("font_weight must be in [1, 1000]"));
-        }
-        Ok(theme)
-    }
-}
-
-impl Default for Theme {
-    fn default() -> Self {
-        Self {
-            font: None,
-            font_weight: 600,
-            colors: ThemeColors::default(),
-        }
+        toml::from_str(&fs::read_to_string(path).whence()?).whence()
     }
 }
 
