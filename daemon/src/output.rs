@@ -7,7 +7,7 @@ use std::os::fd::AsRawFd;
 
 use crate::mapper::{GamepadAxis, Output};
 use scd::config::{GamepadButton, MouseButton, is_keyboard_key};
-use scd::{Error, Result, ResultExt};
+use scd::{Error, Result};
 
 pub struct Outputs {
     gamepad: Option<VirtualDevice>,
@@ -36,14 +36,11 @@ impl Outputs {
                 keyboard_keys.insert(key);
             }
         }
-        let keyboard = VirtualDevice::builder()
-            .whence()?
+        let keyboard = VirtualDevice::builder()?
             .name("scd keyboard")
             .input_id(InputId::new(BusType::BUS_VIRTUAL, 0x1209, 0x5344, 1))
-            .with_keys(&keyboard_keys)
-            .whence()?
-            .build()
-            .whence()?;
+            .with_keys(&keyboard_keys)?
+            .build()?;
 
         let mouse_keys = AttributeSet::from_iter([
             KeyCode::BTN_LEFT,
@@ -61,16 +58,12 @@ impl Outputs {
             RelativeAxisCode::REL_WHEEL,
             RelativeAxisCode::REL_HWHEEL,
         ]);
-        let mouse = VirtualDevice::builder()
-            .whence()?
+        let mouse = VirtualDevice::builder()?
             .name("scd mouse")
             .input_id(InputId::new(BusType::BUS_VIRTUAL, 0x1209, 0x5345, 1))
-            .with_keys(&mouse_keys)
-            .whence()?
-            .with_relative_axes(&mouse_axes)
-            .whence()?
-            .build()
-            .whence()?;
+            .with_keys(&mouse_keys)?
+            .with_relative_axes(&mouse_axes)?
+            .build()?;
 
         Ok(Self {
             gamepad: gamepad.then(Self::create_gamepad).transpose()?,
@@ -100,13 +93,11 @@ impl Outputs {
     pub fn emit(&mut self, command: &Output) -> Result<()> {
         match command {
             Output::Key { key, pressed } => {
-                self.keyboard
-                    .emit(&[InputEvent::new(
-                        EventType::KEY.0,
-                        key.code(),
-                        i32::from(*pressed),
-                    )])
-                    .whence()?;
+                self.keyboard.emit(&[InputEvent::new(
+                    EventType::KEY.0,
+                    key.code(),
+                    i32::from(*pressed),
+                )])?;
                 if *key == KeyCode::KEY_LEFTSHIFT {
                     self.left_shift_held = *pressed;
                 } else if *key == KeyCode::KEY_RIGHTSHIFT {
@@ -125,13 +116,11 @@ impl Outputs {
                     MouseButton::Back => KeyCode::BTN_BACK,
                     MouseButton::Task => KeyCode::BTN_TASK,
                 };
-                self.mouse
-                    .emit(&[InputEvent::new(
-                        EventType::KEY.0,
-                        code.code(),
-                        i32::from(*pressed),
-                    )])
-                    .whence()
+                Ok(self.mouse.emit(&[InputEvent::new(
+                    EventType::KEY.0,
+                    code.code(),
+                    i32::from(*pressed),
+                )])?)
             }
             Output::GamepadButton { button, pressed } => {
                 let Some(gamepad) = &mut self.gamepad else {
@@ -161,13 +150,11 @@ impl Outputs {
                     GamepadButton::PaddleRightUpper => KeyCode::BTN_TRIGGER_HAPPY3,
                     GamepadButton::PaddleRightLower => KeyCode::BTN_TRIGGER_HAPPY4,
                 };
-                gamepad
-                    .emit(&[InputEvent::new(
-                        EventType::KEY.0,
-                        code.code(),
-                        i32::from(*pressed),
-                    )])
-                    .whence()
+                Ok(gamepad.emit(&[InputEvent::new(
+                    EventType::KEY.0,
+                    code.code(),
+                    i32::from(*pressed),
+                )])?)
             }
             Output::GamepadAxis { axis, value } => {
                 let Some(gamepad) = &mut self.gamepad else {
@@ -186,9 +173,7 @@ impl Outputs {
                 } else {
                     (value.clamp(-1.0, 1.0) * 32767.0).round() as i32
                 };
-                gamepad
-                    .emit(&[InputEvent::new(EventType::ABSOLUTE.0, code.0, value)])
-                    .whence()
+                Ok(gamepad.emit(&[InputEvent::new(EventType::ABSOLUTE.0, code.0, value)])?)
             }
             Output::MouseMotion { x, y } => Self::emit_relative(
                 &mut self.mouse,
@@ -210,21 +195,17 @@ impl Outputs {
 
     pub fn key(&mut self, key: KeyCode, shift: bool) -> Result<()> {
         if shift && !self.left_shift_held && !self.right_shift_held {
-            self.keyboard
-                .emit(&[
-                    InputEvent::new(EventType::KEY.0, KeyCode::KEY_LEFTSHIFT.code(), 1),
-                    InputEvent::new(EventType::KEY.0, key.code(), 1),
-                    InputEvent::new(EventType::KEY.0, key.code(), 0),
-                    InputEvent::new(EventType::KEY.0, KeyCode::KEY_LEFTSHIFT.code(), 0),
-                ])
-                .whence()
+            Ok(self.keyboard.emit(&[
+                InputEvent::new(EventType::KEY.0, KeyCode::KEY_LEFTSHIFT.code(), 1),
+                InputEvent::new(EventType::KEY.0, key.code(), 1),
+                InputEvent::new(EventType::KEY.0, key.code(), 0),
+                InputEvent::new(EventType::KEY.0, KeyCode::KEY_LEFTSHIFT.code(), 0),
+            ])?)
         } else {
-            self.keyboard
-                .emit(&[
-                    InputEvent::new(EventType::KEY.0, key.code(), 1),
-                    InputEvent::new(EventType::KEY.0, key.code(), 0),
-                ])
-                .whence()
+            Ok(self.keyboard.emit(&[
+                InputEvent::new(EventType::KEY.0, key.code(), 1),
+                InputEvent::new(EventType::KEY.0, key.code(), 0),
+            ])?)
         }
     }
 
@@ -240,7 +221,7 @@ impl Outputs {
         for event in events {
             match event.destructure() {
                 EventSummary::UInput(event, UInputCode::UI_FF_UPLOAD, ..) => {
-                    let mut upload = gamepad.process_ff_upload(event).whence()?;
+                    let mut upload = gamepad.process_ff_upload(event)?;
                     let effect = upload.effect();
                     let rumble = match effect.kind {
                         FFEffectKind::Rumble {
@@ -257,7 +238,7 @@ impl Outputs {
                     }
                 }
                 EventSummary::UInput(event, UInputCode::UI_FF_ERASE, ..) => {
-                    let erase = gamepad.process_ff_erase(event).whence()?;
+                    let erase = gamepad.process_ff_erase(event)?;
                     self.rumble.erase(erase.effect_id() as i16);
                 }
                 EventSummary::ForceFeedback(_, id, repetitions) => {
@@ -296,29 +277,19 @@ impl Outputs {
         ]);
         let stick = AbsInfo::new(0, -32768, 32767, 1024, 4096, 1);
         let trigger = AbsInfo::new(0, 0, 32767, 0, 256, 1);
-        let gamepad = VirtualDevice::builder()
-            .whence()?
+        let gamepad = VirtualDevice::builder()?
             .name("scd gamepad")
             .input_id(InputId::new(BusType::BUS_VIRTUAL, 0x1209, 0x5343, 1))
-            .with_keys(&gamepad_keys)
-            .whence()?
-            .with_absolute_axis(&UinputAbsSetup::new(AbsoluteAxisCode::ABS_X, stick))
-            .whence()?
-            .with_absolute_axis(&UinputAbsSetup::new(AbsoluteAxisCode::ABS_Y, stick))
-            .whence()?
-            .with_absolute_axis(&UinputAbsSetup::new(AbsoluteAxisCode::ABS_RX, stick))
-            .whence()?
-            .with_absolute_axis(&UinputAbsSetup::new(AbsoluteAxisCode::ABS_RY, stick))
-            .whence()?
-            .with_absolute_axis(&UinputAbsSetup::new(AbsoluteAxisCode::ABS_Z, trigger))
-            .whence()?
-            .with_absolute_axis(&UinputAbsSetup::new(AbsoluteAxisCode::ABS_RZ, trigger))
-            .whence()?
-            .with_ff(&AttributeSet::from_iter([FFEffectCode::FF_RUMBLE]))
-            .whence()?
+            .with_keys(&gamepad_keys)?
+            .with_absolute_axis(&UinputAbsSetup::new(AbsoluteAxisCode::ABS_X, stick))?
+            .with_absolute_axis(&UinputAbsSetup::new(AbsoluteAxisCode::ABS_Y, stick))?
+            .with_absolute_axis(&UinputAbsSetup::new(AbsoluteAxisCode::ABS_RX, stick))?
+            .with_absolute_axis(&UinputAbsSetup::new(AbsoluteAxisCode::ABS_RY, stick))?
+            .with_absolute_axis(&UinputAbsSetup::new(AbsoluteAxisCode::ABS_Z, trigger))?
+            .with_absolute_axis(&UinputAbsSetup::new(AbsoluteAxisCode::ABS_RZ, trigger))?
+            .with_ff(&AttributeSet::from_iter([FFEffectCode::FF_RUMBLE]))?
             .with_ff_effects_max(16)
-            .build()
-            .whence()?;
+            .build()?;
         let flags = unsafe { libc::fcntl(gamepad.as_raw_fd(), libc::F_GETFL) };
         if flags < 0
             || unsafe { libc::fcntl(gamepad.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) }
@@ -343,12 +314,10 @@ impl Outputs {
         if output == [0; 2] {
             return Ok(());
         }
-        device
-            .emit(&[
-                InputEvent::new(EventType::RELATIVE.0, axes[0].0, output[0]),
-                InputEvent::new(EventType::RELATIVE.0, axes[1].0, output[1]),
-            ])
-            .whence()
+        Ok(device.emit(&[
+            InputEvent::new(EventType::RELATIVE.0, axes[0].0, output[0]),
+            InputEvent::new(EventType::RELATIVE.0, axes[1].0, output[1]),
+        ])?)
     }
 }
 

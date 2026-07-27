@@ -3,7 +3,7 @@ use crate::{
     render::KeyboardRenderer,
     theme::Theme,
 };
-use scd::{Client, OskState, Result, ResultExt};
+use scd::{Client, OskState, Result};
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState, FrameCallbackData},
     delegate_registry,
@@ -34,17 +34,15 @@ use smithay_client_toolkit::{
 use std::{path::PathBuf, sync::mpsc, thread, time::Duration};
 
 pub fn run(socket: PathBuf, font: Box<[u8]>, theme: Theme, width: u32, height: u32) -> Result<()> {
-    let connection = Connection::connect_to_env().whence()?;
-    let (globals, event_queue) = registry_queue_init(&connection).whence()?;
+    let connection = Connection::connect_to_env()?;
+    let (globals, event_queue) = registry_queue_init(&connection)?;
     let qh = event_queue.handle();
-    let mut event_loop = EventLoop::<State>::try_new().whence()?;
-    WaylandSource::new(connection.clone(), event_queue)
-        .insert(event_loop.handle())
-        .whence()?;
+    let mut event_loop = EventLoop::<State>::try_new()?;
+    WaylandSource::new(connection.clone(), event_queue).insert(event_loop.handle())?;
 
-    let compositor = CompositorState::bind(&globals, &qh).whence()?;
-    let shell = LayerShell::bind(&globals, &qh).whence()?;
-    let shm = Shm::bind(&globals, &qh).whence()?;
+    let compositor = CompositorState::bind(&globals, &qh)?;
+    let shell = LayerShell::bind(&globals, &qh)?;
+    let shm = Shm::bind(&globals, &qh)?;
     let surface = compositor.create_surface(&qh);
     let layer = shell.create_layer_surface(&qh, surface, Layer::Overlay, Some("scd-osk"), None);
     let input_region = compositor.wl_compositor().create_region(&qh, ());
@@ -52,39 +50,36 @@ pub fn run(socket: PathBuf, font: Box<[u8]>, theme: Theme, width: u32, height: u
     input_region.destroy();
 
     let (input_sender, input) = channel::channel();
-    thread::Builder::new()
-        .name("scd-osk-input".into())
-        .spawn({
-            let socket = socket.clone();
-            move || {
-                let client = Client::new(socket);
-                loop {
-                    match client.osk() {
-                        Ok(mut stream) => {
-                            for state in &mut stream {
-                                match state {
-                                    Ok(state) => {
-                                        if input_sender.send(Some(state)).is_err() {
-                                            return;
-                                        }
+    thread::Builder::new().name("scd-osk-input".into()).spawn({
+        let socket = socket.clone();
+        move || {
+            let client = Client::new(socket);
+            loop {
+                match client.osk() {
+                    Ok(mut stream) => {
+                        for state in &mut stream {
+                            match state {
+                                Ok(state) => {
+                                    if input_sender.send(Some(state)).is_err() {
+                                        return;
                                     }
-                                    Err(error) => {
-                                        log::warn!("keyboard input stream failed: {error}");
-                                        break;
-                                    }
+                                }
+                                Err(error) => {
+                                    log::warn!("keyboard input stream failed: {error}");
+                                    break;
                                 }
                             }
                         }
-                        Err(error) => log::warn!("could not connect keyboard input: {error}"),
                     }
-                    if input_sender.send(None).is_err() {
-                        return;
-                    }
-                    thread::sleep(Duration::from_secs(1));
+                    Err(error) => log::warn!("could not connect keyboard input: {error}"),
                 }
+                if input_sender.send(None).is_err() {
+                    return;
+                }
+                thread::sleep(Duration::from_secs(1));
             }
-        })
-        .whence()?;
+        }
+    })?;
 
     let (key_output, keys) = mpsc::channel::<KeyboardOutput>();
     thread::Builder::new()
@@ -104,10 +99,9 @@ pub fn run(socket: PathBuf, font: Box<[u8]>, theme: Theme, width: u32, height: u
                     log::warn!("keyboard output failed: {error}");
                 }
             }
-        })
-        .whence()?;
+        })?;
 
-    let pool = SlotPool::new(4, &shm).whence()?;
+    let pool = SlotPool::new(4, &shm)?;
     let mut state = State {
         registry: RegistryState::new(&globals),
         outputs: OutputState::new(&globals, &qh),
@@ -134,11 +128,10 @@ pub fn run(socket: PathBuf, font: Box<[u8]>, theme: Theme, width: u32, height: u
             channel::Event::Msg(Some(input)) => state.input(input),
             channel::Event::Msg(None) => state.disconnected(),
             channel::Event::Closed => state.exit = true,
-        })
-        .whence()?;
+        })?;
 
     while !state.exit {
-        event_loop.dispatch(None::<Duration>, &mut state).whence()?;
+        event_loop.dispatch(None::<Duration>, &mut state)?;
     }
     Ok(())
 }
@@ -242,8 +235,7 @@ impl State {
                         height as i32,
                         stride,
                         wl_shm::Format::Argb8888,
-                    )
-                    .whence()?
+                    )?
                     .0,
             );
         }
@@ -255,15 +247,12 @@ impl State {
         let canvas = match self.pool.canvas(buffer) {
             Some(canvas) => canvas,
             None => {
-                let (next, canvas) = self
-                    .pool
-                    .create_buffer(
-                        width as i32,
-                        height as i32,
-                        stride,
-                        wl_shm::Format::Argb8888,
-                    )
-                    .whence()?;
+                let (next, canvas) = self.pool.create_buffer(
+                    width as i32,
+                    height as i32,
+                    stride,
+                    wl_shm::Format::Argb8888,
+                )?;
                 *buffer = next;
                 canvas
             }
@@ -284,7 +273,7 @@ impl State {
         self.layer
             .wl_surface()
             .frame(&self.qh, FrameCallbackData(self.layer.wl_surface().clone()));
-        buffer.attach_to(self.layer.wl_surface()).whence()?;
+        buffer.attach_to(self.layer.wl_surface())?;
         self.layer.commit();
         self.frame_pending = true;
         self.redraw_pending = self.renderer.animation_pending();

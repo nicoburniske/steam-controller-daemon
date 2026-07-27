@@ -7,7 +7,7 @@ use clap::Parser;
 use evdev::KeyCode;
 use keyboard::Keyboard;
 use render::KeyboardRenderer;
-use scd::{ControllerButton, Error, OskPad, OskState, Result, ResultExt};
+use scd::{ControllerButton, Error, OskPad, OskState, Result};
 use std::{
     env, fs,
     io::{BufWriter, Write},
@@ -51,7 +51,7 @@ fn main() -> Result<()> {
         .as_deref()
         .or(theme.font.as_deref())
         .ok_or_else(|| Error::message("pass --font or configure font in osk.toml"))?;
-    let font = fs::read(font_path).whence()?.into_boxed_slice();
+    let font = fs::read(font_path)?.into_boxed_slice();
     let width = args.width.unwrap_or(theme.width);
     let height = args.height.unwrap_or(theme.height);
 
@@ -84,18 +84,16 @@ fn main() -> Result<()> {
         keyboard.update(state, &keys);
         let mut renderer = KeyboardRenderer::new(font, theme, width, height, 1)?;
         renderer.render(&keyboard);
-        let mut output = BufWriter::new(fs::File::create(preview).whence()?);
-        write!(output, "P6\n{width} {height}\n255\n").whence()?;
+        let mut output = BufWriter::new(fs::File::create(preview)?);
+        write!(output, "P6\n{width} {height}\n255\n")?;
         for pixel in renderer.pixels() {
-            output
-                .write_all(&[
-                    (pixel.raw() >> 16) as u8,
-                    (pixel.raw() >> 8) as u8,
-                    pixel.raw() as u8,
-                ])
-                .whence()?;
+            output.write_all(&[
+                (pixel.raw() >> 16) as u8,
+                (pixel.raw() >> 8) as u8,
+                pixel.raw() as u8,
+            ])?;
         }
-        output.flush().whence()?;
+        output.flush()?;
         return Ok(());
     }
 

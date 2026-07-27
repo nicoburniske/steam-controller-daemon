@@ -5,7 +5,7 @@ use indexmap::IndexMap;
 use serde::{Deserialize, Deserializer};
 
 use crate::{
-    Error, Result as ScdResult, ResultExt,
+    Error, Result as ScdResult,
     protocol::{Button, Buttons},
 };
 
@@ -25,11 +25,11 @@ pub struct Config {
 
 impl Config {
     pub fn load(path: impl AsRef<Path>) -> ScdResult<Self> {
-        Self::parse(&fs::read_to_string(path).whence()?)
+        Self::parse(&fs::read_to_string(path)?)
     }
 
     pub fn parse(source: &str) -> ScdResult<Self> {
-        let config: Self = toml::from_str(source).whence()?;
+        let config: Self = toml::from_str(source)?;
         config.validate()?;
         Ok(config)
     }

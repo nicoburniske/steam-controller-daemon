@@ -16,7 +16,7 @@ use blit::{
 };
 use blit_cpu::{Argb8888, Font, FontFace, Renderer, RendererConfig, Scanline, VecBuffer};
 use evdev::KeyCode;
-use scd::{ControllerButton, Error, Result, ResultExt};
+use scd::{ControllerButton, Error, Result};
 use std::hash::Hash;
 use std::time::{Duration, Instant};
 
@@ -50,7 +50,7 @@ impl KeyboardRenderer {
                 fonts: vec![FontFace {
                     id: Default::default(),
                     weight: 400,
-                    font: Font::from_owned(font).whence()?,
+                    font: Font::from_owned(font)?,
                 }],
                 font_metric_cache_capacity: 256,
                 glyph_cache_capacity: 1024 * 1024,

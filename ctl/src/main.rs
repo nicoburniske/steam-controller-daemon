@@ -1,5 +1,5 @@
 use clap::{Parser, Subcommand};
-use scd::{Client, Config, HapticSound, ResultExt};
+use scd::{Client, Config, HapticSound};
 use std::{path::PathBuf, thread, time::Duration};
 
 #[derive(Parser)]
@@ -53,7 +53,7 @@ fn main() -> scd::Result<()> {
     let client = Client::new(args.socket);
     match args.command {
         Command::Status { json: true } => {
-            println!("{}", serde_json::to_string(&client.status()?).whence()?)
+            println!("{}", serde_json::to_string(&client.status()?)?)
         }
         Command::Status { json: false } => {
             let status = client.status()?;

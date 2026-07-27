@@ -1,4 +1,4 @@
-use scd::{Error, Result, ResultExt};
+use scd::{Error, Result};
 use std::fs::{self, File, OpenOptions};
 use std::io::ErrorKind;
 use std::os::fd::AsRawFd;
@@ -24,7 +24,7 @@ impl SteamDevice {
         Self::set_mode(&device, 0o660)?;
         if let Err(error) = fs::write(STEAM_DEVICE, &bus_id) {
             let _ = Self::set_mode(&device, 0o600);
-            return Err(error).whence();
+            return Err(error.into());
         }
         if let Err(error) = Self::rebind(&device) {
             let _ = fs::remove_file(STEAM_DEVICE);
@@ -39,7 +39,7 @@ impl SteamDevice {
         let bus_id = match fs::read_to_string(STEAM_DEVICE) {
             Ok(bus_id) => bus_id,
             Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(error).whence(),
+            Err(error) => return Err(error.into()),
         };
         let bus_id = bus_id.trim().to_owned();
         let device = Self::open(&bus_id)?;
@@ -51,7 +51,7 @@ impl SteamDevice {
         Self::set_mode(&self.device, 0o600)?;
         if let Err(error) = fs::remove_file(STEAM_DEVICE) {
             let _ = Self::set_mode(&self.device, 0o660);
-            return Err(error).whence();
+            return Err(error.into());
         }
         if let Err(error) = Self::rebind(&self.device) {
             let _ = fs::write(STEAM_DEVICE, &self.bus_id);
@@ -69,21 +69,16 @@ impl SteamDevice {
         {
             return Err(Error::message("Steam handoff device is no longer present"));
         }
-        let bus = fs::read_to_string(path.join("busnum"))
-            .whence()?
+        let bus = fs::read_to_string(path.join("busnum"))?
             .trim()
-            .parse::<u16>()
-            .whence()?;
-        let device = fs::read_to_string(path.join("devnum"))
-            .whence()?
+            .parse::<u16>()?;
+        let device = fs::read_to_string(path.join("devnum"))?
             .trim()
-            .parse::<u16>()
-            .whence()?;
-        OpenOptions::new()
+            .parse::<u16>()?;
+        Ok(OpenOptions::new()
             .read(true)
             .write(true)
-            .open(format!("/dev/bus/usb/{bus:03}/{device:03}"))
-            .whence()
+            .open(format!("/dev/bus/usb/{bus:03}/{device:03}"))?)
     }
 
     fn rebind(device: &File) -> Result<()> {
@@ -106,9 +101,7 @@ impl SteamDevice {
     }
 
     fn set_mode(device: &File, mode: u32) -> Result<()> {
-        device
-            .set_permissions(fs::Permissions::from_mode(mode))
-            .whence()
+        Ok(device.set_permissions(fs::Permissions::from_mode(mode))?)
     }
 }
 

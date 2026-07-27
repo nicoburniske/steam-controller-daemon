@@ -10,7 +10,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use crate::steam::SteamDevice;
-use scd::{Result, ResultExt};
+use scd::Result;
 
 pub struct DeviceManager {
     api: HidApi,
@@ -36,7 +36,7 @@ struct Slot {
 
 impl DeviceManager {
     pub fn new(trackpad_click_pressure: u16) -> Result<Self> {
-        let api = HidApi::new().whence()?;
+        let api = HidApi::new()?;
         let steam = SteamDevice::recover()?;
         let mut manager = Self {
             api,
@@ -149,8 +149,7 @@ impl DeviceManager {
             .file_name()
             .ok_or_else(|| scd::Error::message("controller has no hidraw device name"))?;
             let sysfs =
-                fs::canonicalize(Path::new("/sys/class/hidraw").join(hidraw).join("device"))
-                    .whence()?;
+                fs::canonicalize(Path::new("/sys/class/hidraw").join(hidraw).join("device"))?;
             let bus_id = sysfs
                 .ancestors()
                 .find(|path| {
@@ -196,8 +195,7 @@ impl DeviceManager {
         if let Some(active) = self.active {
             self.slots[active]
                 .device
-                .send_feature_report(&lizard_mode_report(false))
-                .whence()?;
+                .send_feature_report(&lizard_mode_report(false))?;
         }
         Ok(())
     }
@@ -208,8 +206,7 @@ impl DeviceManager {
             for pad in [Trackpad::Left, Trackpad::Right] {
                 self.slots[active]
                     .device
-                    .send_feature_report(&trackpad_click_pressure_report(pad, pressure))
-                    .whence()?;
+                    .send_feature_report(&trackpad_click_pressure_report(pad, pressure))?;
             }
         }
         Ok(())
@@ -311,16 +308,13 @@ impl DeviceManager {
         };
         let mut report = [0; 10];
         let length = haptic.encode(&mut report);
-        self.slots[active]
-            .device
-            .write(&report[..length])
-            .whence()?;
+        self.slots[active].device.write(&report[..length])?;
         Ok(())
     }
 
     fn scan(&mut self) -> Result<()> {
         self.last_scan = Instant::now();
-        self.api.refresh_devices().whence()?;
+        self.api.refresh_devices()?;
         let previous_slot_count = self.slots.len();
         for info in self.api.device_list().filter(|info| {
             info.vendor_id() == VALVE_VENDOR_ID
@@ -362,20 +356,17 @@ impl DeviceManager {
     fn configure(&self, index: usize) -> Result<()> {
         self.slots[index]
             .device
-            .send_feature_report(&lizard_mode_report(false))
-            .whence()?;
+            .send_feature_report(&lizard_mode_report(false))?;
         self.slots[index]
             .device
-            .send_feature_report(&imu_mode_report(true))
-            .whence()?;
+            .send_feature_report(&imu_mode_report(true))?;
         for pad in [Trackpad::Left, Trackpad::Right] {
             self.slots[index]
                 .device
                 .send_feature_report(&trackpad_click_pressure_report(
                     pad,
                     self.trackpad_click_pressure,
-                ))
-                .whence()?;
+                ))?;
         }
         Ok(())
     }

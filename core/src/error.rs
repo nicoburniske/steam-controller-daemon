@@ -36,18 +36,9 @@ impl fmt::Display for Error {
     }
 }
 
-impl std::error::Error for Error {}
-
-pub trait ResultExt<T> {
-    fn whence(self) -> Result<T>;
-}
-
-impl<T, E: fmt::Display> ResultExt<T> for std::result::Result<T, E> {
+impl<E: std::error::Error + 'static> From<E> for Error {
     #[track_caller]
-    fn whence(self) -> Result<T> {
-        match self {
-            Ok(value) => Ok(value),
-            Err(error) => Err(Error::message(error)),
-        }
+    fn from(error: E) -> Self {
+        Self::message(error)
     }
 }

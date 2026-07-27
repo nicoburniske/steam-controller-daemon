@@ -1,5 +1,5 @@
 use crate::protocol::Button;
-use crate::{Error, Result, ResultExt};
+use crate::{Error, Result};
 use evdev::KeyCode;
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufReader, Write};
@@ -195,13 +195,13 @@ impl std::fmt::Display for HapticSound {
 }
 
 impl std::str::FromStr for HapticSound {
-    type Err = Error;
+    type Err = String;
 
-    fn from_str(value: &str) -> Result<Self> {
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
         Self::ALL
             .into_iter()
             .find(|sound| sound.as_str() == value)
-            .ok_or_else(|| Error::message(format!("unknown haptic sound `{value}`")))
+            .ok_or_else(|| format!("unknown haptic sound `{value}`"))
     }
 }
 
@@ -363,9 +363,9 @@ impl Client {
     }
 
     pub fn osk(&self) -> Result<OskStream> {
-        let stream = UnixStream::connect(&self.path).whence()?;
-        serde_json::to_writer(&stream, &Request::Osk).whence()?;
-        (&stream).write_all(b"\n").whence()?;
+        let stream = UnixStream::connect(&self.path)?;
+        serde_json::to_writer(&stream, &Request::Osk)?;
+        (&stream).write_all(b"\n")?;
         Ok(OskStream {
             lines: BufReader::new(stream).lines(),
         })
@@ -391,12 +391,12 @@ impl Client {
     }
 
     fn request(&self, request: Request) -> Result<Response> {
-        let stream = UnixStream::connect(&self.path).whence()?;
-        serde_json::to_writer(&stream, &request).whence()?;
-        (&stream).write_all(b"\n").whence()?;
+        let stream = UnixStream::connect(&self.path)?;
+        serde_json::to_writer(&stream, &request)?;
+        (&stream).write_all(b"\n")?;
         let mut response = String::new();
-        BufReader::new(stream).read_line(&mut response).whence()?;
-        match serde_json::from_str(&response).whence()? {
+        BufReader::new(stream).read_line(&mut response)?;
+        match serde_json::from_str(&response)? {
             Response::Error { message } => Err(Error::message(message)),
             response => Ok(response),
         }
@@ -407,9 +407,9 @@ impl Iterator for OskStream {
     type Item = Result<OskState>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.lines.next().map(|line| {
-            let line = line.whence()?;
-            serde_json::from_str(&line).whence()
+        self.lines.next().map(|line| -> Result<_> {
+            let line = line?;
+            Ok(serde_json::from_str(&line)?)
         })
     }
 }

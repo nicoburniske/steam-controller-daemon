@@ -5,7 +5,7 @@ use calloop::{
     ping::{Ping, make_ping},
 };
 use scd::ipc::{OskState, Request, Response};
-use scd::{Error, Result, ResultExt};
+use scd::{Error, Result};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::fs;
@@ -38,7 +38,7 @@ impl Server {
             .parent()
             .filter(|parent| !parent.as_os_str().is_empty())
         {
-            fs::create_dir_all(parent).whence()?;
+            fs::create_dir_all(parent)?;
         }
         match fs::remove_file(&path) {
             Ok(()) => {}
@@ -46,12 +46,12 @@ impl Server {
             Err(error) => return Err(Error::message(error)),
         }
 
-        let listener = UnixListener::bind(&path).whence()?;
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o660)).whence()?;
-        listener.set_nonblocking(true).whence()?;
+        let listener = UnixListener::bind(&path)?;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o660))?;
+        listener.set_nonblocking(true)?;
 
         let (osk, osk_receiver) = watch::channel(OskState::default());
-        let (osk_ping, osk_source) = make_ping().whence()?;
+        let (osk_ping, osk_source) = make_ping()?;
         let (events, event_source) = channel::channel();
         let (commands, receiver) = mpsc::sync_channel(32);
         let (started, startup) = mpsc::sync_channel(1);
@@ -69,10 +69,9 @@ impl Server {
                     log::warn!("IPC event loop failed: {error}");
                     let _ = started.try_send(Err(error));
                 }
-            })
-            .whence()?;
+            })?;
 
-        if let Err(error) = startup.recv().whence().and_then(|result| result) {
+        if let Err(error) = startup.recv()? {
             let _ = thread.join();
             let _ = fs::remove_file(&path);
             return Err(error);
@@ -148,69 +147,63 @@ fn run_ipc(
     osk_source: calloop::ping::PingSource,
     started: mpsc::SyncSender<Result<()>>,
 ) -> Result<()> {
-    let mut event_loop = EventLoop::<IpcState>::try_new().whence()?;
+    let mut event_loop = EventLoop::<IpcState>::try_new()?;
     let handle = event_loop.handle();
     let signal = event_loop.get_signal();
 
-    handle
-        .insert_source(event_source, {
-            let handle = handle.clone();
-            move |event, _, state| match event {
-                ChannelEvent::Msg(IpcEvent::Response { client, response }) => {
-                    if let Some(client) = state.clients.remove(&client) {
-                        if let Ok(output) = json_line(&response) {
-                            let _ = write_message(&client.stream, &output);
-                        }
-                        handle.remove(client.registration);
+    handle.insert_source(event_source, {
+        let handle = handle.clone();
+        move |event, _, state| match event {
+            ChannelEvent::Msg(IpcEvent::Response { client, response }) => {
+                if let Some(client) = state.clients.remove(&client) {
+                    if let Ok(output) = json_line(&response) {
+                        let _ = write_message(&client.stream, &output);
                     }
+                    handle.remove(client.registration);
                 }
-                ChannelEvent::Msg(IpcEvent::Shutdown) | ChannelEvent::Closed => signal.stop(),
             }
-        })
-        .whence()?;
+            ChannelEvent::Msg(IpcEvent::Shutdown) | ChannelEvent::Closed => signal.stop(),
+        }
+    })?;
 
-    handle
-        .insert_source(osk_source, {
-            let handle = handle.clone();
-            move |(), _, state| {
-                let Some(next) = osk_receiver.get_if_new() else {
-                    return;
-                };
-                let Ok(output) = json_line(&next) else {
-                    log::warn!("could not encode OSK state");
-                    return;
-                };
-                state.osk = output;
-                let osk = &state.osk;
-                state.clients.retain(|_, client| {
-                    if !client.osk || write_message(&client.stream, osk).is_ok() {
-                        true
-                    } else {
-                        handle.remove(client.registration);
-                        false
-                    }
-                });
-            }
-        })
-        .whence()?;
+    handle.insert_source(osk_source, {
+        let handle = handle.clone();
+        move |(), _, state| {
+            let Some(next) = osk_receiver.get_if_new() else {
+                return;
+            };
+            let Ok(output) = json_line(&next) else {
+                log::warn!("could not encode OSK state");
+                return;
+            };
+            state.osk = output;
+            let osk = &state.osk;
+            state.clients.retain(|_, client| {
+                if !client.osk || write_message(&client.stream, osk).is_ok() {
+                    true
+                } else {
+                    handle.remove(client.registration);
+                    false
+                }
+            });
+        }
+    })?;
 
-    handle
-        .insert_source(Generic::new(listener, Interest::READ, Mode::Level), {
-            let handle = handle.clone();
-            move |_, listener, state| {
-                accept_clients(listener, &handle, &commands, state);
-                Ok(PostAction::Continue)
-            }
-        })
-        .whence()?;
+    handle.insert_source(Generic::new(listener, Interest::READ, Mode::Level), {
+        let handle = handle.clone();
+        move |_, listener, state| {
+            accept_clients(listener, &handle, &commands, state);
+            Ok(PostAction::Continue)
+        }
+    })?;
 
     let mut state = IpcState {
         clients: HashMap::new(),
         next_client: 1,
-        osk: json_line(&OskState::default()).whence()?,
+        osk: json_line(&OskState::default())?,
     };
-    started.send(Ok(())).whence()?;
-    event_loop.run(None, &mut state, |_| {}).whence()
+    started.send(Ok(()))?;
+    Ok(event_loop.run(None, &mut state, |_| {})?)
 }
 
 fn accept_clients<'a>(

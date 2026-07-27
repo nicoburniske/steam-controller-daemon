@@ -1,5 +1,5 @@
 use blit::color::Color;
-use scd::{Result, ResultExt};
+use scd::Result;
 use serde::{Deserialize, Deserializer};
 use std::{fs, path::Path, path::PathBuf};
 
@@ -35,7 +35,7 @@ pub struct ThemeColor([u8; 4]);
 
 impl Theme {
     pub fn load(path: &Path) -> Result<Self> {
-        toml::from_str(&fs::read_to_string(path).whence()?).whence()
+        Ok(toml::from_str(&fs::read_to_string(path)?)?)
     }
 }
 
