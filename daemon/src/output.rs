@@ -11,6 +11,7 @@ use scd::{Error, Result};
 
 pub struct Outputs {
     gamepad: Option<VirtualDevice>,
+    gamepad_dpad: [bool; 4],
     keyboard: VirtualDevice,
     left_shift_held: bool,
     right_shift_held: bool,
@@ -67,6 +68,7 @@ impl Outputs {
 
         Ok(Self {
             gamepad: gamepad.then(Self::create_gamepad).transpose()?,
+            gamepad_dpad: [false; 4],
             keyboard,
             left_shift_held: false,
             right_shift_held: false,
@@ -82,6 +84,7 @@ impl Outputs {
             return Ok(());
         }
         self.rumble = RumbleEffects::default();
+        self.gamepad_dpad = [false; 4];
         self.gamepad = if enabled {
             Some(Self::create_gamepad()?)
         } else {
@@ -126,35 +129,69 @@ impl Outputs {
                 let Some(gamepad) = &mut self.gamepad else {
                     return Ok(());
                 };
-                let code = match button {
-                    GamepadButton::South => KeyCode::BTN_SOUTH,
-                    GamepadButton::East => KeyCode::BTN_EAST,
+                let pressed_value = i32::from(*pressed);
+                let key = |code: KeyCode| (EventType::KEY, code.code(), pressed_value);
+                let (event_type, code, value) = match button {
+                    GamepadButton::South => key(KeyCode::BTN_SOUTH),
+                    GamepadButton::East => key(KeyCode::BTN_EAST),
                     // xbox x/y aliases are BTN_NORTH/BTN_WEST
-                    GamepadButton::North => KeyCode::BTN_WEST,
-                    GamepadButton::West => KeyCode::BTN_NORTH,
-                    GamepadButton::LeftBumper => KeyCode::BTN_TL,
-                    GamepadButton::RightBumper => KeyCode::BTN_TR,
-                    GamepadButton::LeftTrigger => KeyCode::BTN_TL2,
-                    GamepadButton::RightTrigger => KeyCode::BTN_TR2,
-                    GamepadButton::Select => KeyCode::BTN_SELECT,
-                    GamepadButton::Start => KeyCode::BTN_START,
-                    GamepadButton::Guide => KeyCode::BTN_MODE,
-                    GamepadButton::LeftStick => KeyCode::BTN_THUMBL,
-                    GamepadButton::RightStick => KeyCode::BTN_THUMBR,
-                    GamepadButton::DpadUp => KeyCode::BTN_DPAD_UP,
-                    GamepadButton::DpadDown => KeyCode::BTN_DPAD_DOWN,
-                    GamepadButton::DpadLeft => KeyCode::BTN_DPAD_LEFT,
-                    GamepadButton::DpadRight => KeyCode::BTN_DPAD_RIGHT,
-                    GamepadButton::PaddleLeftUpper => KeyCode::BTN_TRIGGER_HAPPY1,
-                    GamepadButton::PaddleLeftLower => KeyCode::BTN_TRIGGER_HAPPY2,
-                    GamepadButton::PaddleRightUpper => KeyCode::BTN_TRIGGER_HAPPY3,
-                    GamepadButton::PaddleRightLower => KeyCode::BTN_TRIGGER_HAPPY4,
+                    GamepadButton::North => key(KeyCode::BTN_WEST),
+                    GamepadButton::West => key(KeyCode::BTN_NORTH),
+                    GamepadButton::LeftBumper => key(KeyCode::BTN_TL),
+                    GamepadButton::RightBumper => key(KeyCode::BTN_TR),
+                    GamepadButton::LeftTrigger => (
+                        EventType::ABSOLUTE,
+                        AbsoluteAxisCode::ABS_Z.0,
+                        pressed_value * 255,
+                    ),
+                    GamepadButton::RightTrigger => (
+                        EventType::ABSOLUTE,
+                        AbsoluteAxisCode::ABS_RZ.0,
+                        pressed_value * 255,
+                    ),
+                    GamepadButton::Select => key(KeyCode::BTN_SELECT),
+                    GamepadButton::Start => key(KeyCode::BTN_START),
+                    GamepadButton::Guide => key(KeyCode::BTN_MODE),
+                    GamepadButton::LeftStick => key(KeyCode::BTN_THUMBL),
+                    GamepadButton::RightStick => key(KeyCode::BTN_THUMBR),
+                    GamepadButton::DpadUp => {
+                        self.gamepad_dpad[0] = *pressed;
+                        (
+                            EventType::ABSOLUTE,
+                            AbsoluteAxisCode::ABS_HAT0Y.0,
+                            i32::from(self.gamepad_dpad[1]) - i32::from(self.gamepad_dpad[0]),
+                        )
+                    }
+                    GamepadButton::DpadDown => {
+                        self.gamepad_dpad[1] = *pressed;
+                        (
+                            EventType::ABSOLUTE,
+                            AbsoluteAxisCode::ABS_HAT0Y.0,
+                            i32::from(self.gamepad_dpad[1]) - i32::from(self.gamepad_dpad[0]),
+                        )
+                    }
+                    GamepadButton::DpadLeft => {
+                        self.gamepad_dpad[2] = *pressed;
+                        (
+                            EventType::ABSOLUTE,
+                            AbsoluteAxisCode::ABS_HAT0X.0,
+                            i32::from(self.gamepad_dpad[3]) - i32::from(self.gamepad_dpad[2]),
+                        )
+                    }
+                    GamepadButton::DpadRight => {
+                        self.gamepad_dpad[3] = *pressed;
+                        (
+                            EventType::ABSOLUTE,
+                            AbsoluteAxisCode::ABS_HAT0X.0,
+                            i32::from(self.gamepad_dpad[3]) - i32::from(self.gamepad_dpad[2]),
+                        )
+                    }
+                    GamepadButton::PaddleLeftUpper
+                    | GamepadButton::PaddleLeftLower
+                    | GamepadButton::PaddleRightUpper
+                    | GamepadButton::PaddleRightLower => return Ok(()),
                 };
-                Ok(gamepad.emit(&[InputEvent::new(
-                    EventType::KEY.0,
-                    code.code(),
-                    i32::from(*pressed),
-                )])?)
+                Ok(gamepad.emit(&[InputEvent::new(event_type.0, code, value)])?)
             }
             Output::GamepadAxis { axis, value } => {
                 let Some(gamepad) = &mut self.gamepad else {
@@ -169,9 +206,10 @@ impl Outputs {
                     GamepadAxis::RightTrigger => AbsoluteAxisCode::ABS_RZ,
                 };
                 let value = if matches!(code, AbsoluteAxisCode::ABS_Z | AbsoluteAxisCode::ABS_RZ) {
-                    (value.clamp(0.0, 1.0) * 32767.0).round() as i32
+                    (value.clamp(0.0, 1.0) * 255.0).round() as i32
                 } else {
-                    (value.clamp(-1.0, 1.0) * 32767.0).round() as i32
+                    let value = value.clamp(-1.0, 1.0);
+                    (value * if value < 0.0 { 32768.0 } else { 32767.0 }).round() as i32
                 };
                 Ok(gamepad.emit(&[InputEvent::new(EventType::ABSOLUTE.0, code.0, value)])?)
             }
@@ -259,27 +297,18 @@ impl Outputs {
             KeyCode::BTN_WEST,
             KeyCode::BTN_TL,
             KeyCode::BTN_TR,
-            KeyCode::BTN_TL2,
-            KeyCode::BTN_TR2,
             KeyCode::BTN_SELECT,
             KeyCode::BTN_START,
             KeyCode::BTN_MODE,
             KeyCode::BTN_THUMBL,
             KeyCode::BTN_THUMBR,
-            KeyCode::BTN_DPAD_UP,
-            KeyCode::BTN_DPAD_DOWN,
-            KeyCode::BTN_DPAD_LEFT,
-            KeyCode::BTN_DPAD_RIGHT,
-            KeyCode::BTN_TRIGGER_HAPPY1,
-            KeyCode::BTN_TRIGGER_HAPPY2,
-            KeyCode::BTN_TRIGGER_HAPPY3,
-            KeyCode::BTN_TRIGGER_HAPPY4,
         ]);
-        let stick = AbsInfo::new(0, -32768, 32767, 1024, 4096, 1);
-        let trigger = AbsInfo::new(0, 0, 32767, 0, 256, 1);
+        let stick = AbsInfo::new(0, -32768, 32767, 16, 128, 0);
+        let trigger = AbsInfo::new(0, 0, 255, 0, 0, 0);
+        let dpad = AbsInfo::new(0, -1, 1, 0, 0, 0);
         let gamepad = VirtualDevice::builder()?
-            .name("scd gamepad")
-            .input_id(InputId::new(BusType::BUS_VIRTUAL, 0x1209, 0x5343, 1))
+            .name("Microsoft X-Box 360 pad")
+            .input_id(InputId::new(BusType::BUS_USB, 0x045e, 0x028e, 0x0114))
             .with_keys(&gamepad_keys)?
             .with_absolute_axis(&UinputAbsSetup::new(AbsoluteAxisCode::ABS_X, stick))?
             .with_absolute_axis(&UinputAbsSetup::new(AbsoluteAxisCode::ABS_Y, stick))?
@@ -287,6 +316,8 @@ impl Outputs {
             .with_absolute_axis(&UinputAbsSetup::new(AbsoluteAxisCode::ABS_RY, stick))?
             .with_absolute_axis(&UinputAbsSetup::new(AbsoluteAxisCode::ABS_Z, trigger))?
             .with_absolute_axis(&UinputAbsSetup::new(AbsoluteAxisCode::ABS_RZ, trigger))?
+            .with_absolute_axis(&UinputAbsSetup::new(AbsoluteAxisCode::ABS_HAT0X, dpad))?
+            .with_absolute_axis(&UinputAbsSetup::new(AbsoluteAxisCode::ABS_HAT0Y, dpad))?
             .with_ff(&AttributeSet::from_iter([FFEffectCode::FF_RUMBLE]))?
             .with_ff_effects_max(16)
             .build()?;
