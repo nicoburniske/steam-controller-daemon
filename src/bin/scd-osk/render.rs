@@ -97,6 +97,7 @@ impl KeyboardRenderer {
             let screen = ui.screen();
             blit::paint::Rectangle::new(screen)
                 .background(colors.background.color())
+                .border(2.0, colors.border.color())
                 .render(ui);
 
             let bindings = keyboard.bindings();

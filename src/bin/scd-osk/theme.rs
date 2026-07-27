@@ -15,6 +15,7 @@ pub struct Theme {
 #[serde(default, deny_unknown_fields)]
 pub struct ThemeColors {
     pub background: ThemeColor,
+    pub border: ThemeColor,
     pub key: ThemeColor,
     pub special: ThemeColor,
     pub hover: ThemeColor,
@@ -55,6 +56,7 @@ impl Default for ThemeColors {
     fn default() -> Self {
         Self {
             background: ThemeColor::rgb(35, 38, 46),
+            border: ThemeColor::rgb(77, 82, 88),
             key: ThemeColor::rgb(14, 20, 27),
             special: ThemeColor::rgb(0, 0, 0),
             hover: ThemeColor::rgb(255, 255, 255),
