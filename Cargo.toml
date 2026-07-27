@@ -7,6 +7,7 @@ rust-version = "1.85"
 [dependencies]
 blit = { git = "https://github.com/nicoburniske/blit", rev = "0e10cf45a3da20ef0cc266e30fe0218651aaef1d", optional = true }
 blit-cpu = { git = "https://github.com/nicoburniske/blit", rev = "0e10cf45a3da20ef0cc266e30fe0218651aaef1d", optional = true }
+calloop = "0.14"
 clap = { version = "4.5", features = ["derive"] }
 env_logger = "0.11"
 evdev = "0.13"

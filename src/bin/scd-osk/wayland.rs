@@ -55,34 +55,36 @@ pub fn run(socket: PathBuf, font: Box<[u8]>, theme: Theme) -> Result<()> {
     input_region.destroy();
 
     let (input_sender, input) = channel::channel();
-    let input_socket = socket.clone();
     thread::Builder::new()
         .name("scd-osk-input".into())
-        .spawn(move || {
-            let client = Client::new(input_socket);
-            loop {
-                match client.osk() {
-                    Ok(mut stream) => {
-                        for state in &mut stream {
-                            match state {
-                                Ok(state) => {
-                                    if input_sender.send(Some(state)).is_err() {
-                                        return;
+        .spawn({
+            let socket = socket.clone();
+            move || {
+                let client = Client::new(socket);
+                loop {
+                    match client.osk() {
+                        Ok(mut stream) => {
+                            for state in &mut stream {
+                                match state {
+                                    Ok(state) => {
+                                        if input_sender.send(Some(state)).is_err() {
+                                            return;
+                                        }
                                     }
-                                }
-                                Err(error) => {
-                                    log::warn!("keyboard input stream failed: {error}");
-                                    break;
+                                    Err(error) => {
+                                        log::warn!("keyboard input stream failed: {error}");
+                                        break;
+                                    }
                                 }
                             }
                         }
+                        Err(error) => log::warn!("could not connect keyboard input: {error}"),
                     }
-                    Err(error) => log::warn!("could not connect keyboard input: {error}"),
+                    if input_sender.send(None).is_err() {
+                        return;
+                    }
+                    thread::sleep(Duration::from_secs(1));
                 }
-                if input_sender.send(None).is_err() {
-                    return;
-                }
-                thread::sleep(Duration::from_secs(1));
             }
         })
         .whence()?;

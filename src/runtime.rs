@@ -31,7 +31,7 @@ pub fn run(config_path: impl AsRef<Path>, socket_path: impl AsRef<Path>) -> Resu
     log::info!("active mode: {}", mapper.active_mode());
     loop {
         while let Ok(command) = commands.try_recv() {
-            let response = match command.request {
+            let response = match &command.request {
                 Request::Status => Response::Status {
                     status: Status {
                         connected: device.connected(),
@@ -41,7 +41,7 @@ pub fn run(config_path: impl AsRef<Path>, socket_path: impl AsRef<Path>) -> Resu
                         device: device.device_name(),
                     },
                 },
-                Request::ModeSet { name } => match mapper.set_mode(&name, &mut mapped) {
+                Request::ModeSet { name } => match mapper.set_mode(name, &mut mapped) {
                     Ok(()) => {
                         emit(
                             &mut mapped,
@@ -69,7 +69,7 @@ pub fn run(config_path: impl AsRef<Path>, socket_path: impl AsRef<Path>) -> Resu
                     publish_keyboard(&mapper, &mut keyboard, &mut ipc);
                     Response::Done
                 }
-                Request::Sound { sound } => match device.play_haptic(sound) {
+                Request::Sound { sound } => match device.play_haptic(*sound) {
                     Ok(()) => Response::Done,
                     Err(error) => Response::Error {
                         message: error.to_string(),
@@ -95,7 +95,7 @@ pub fn run(config_path: impl AsRef<Path>, socket_path: impl AsRef<Path>) -> Resu
                     },
                 },
                 Request::OskHide { session } => {
-                    if session == 0 || session != keyboard.session() || !keyboard.visible {
+                    if *session == 0 || *session != keyboard.session() || !keyboard.visible {
                         Response::Error {
                             message: "keyboard session is no longer active".into(),
                         }
@@ -119,8 +119,8 @@ pub fn run(config_path: impl AsRef<Path>, socket_path: impl AsRef<Path>) -> Resu
                     shift,
                     session,
                 } => {
-                    if session == 0
-                        || session != keyboard.session()
+                    if *session == 0
+                        || *session != keyboard.session()
                         || (!keyboard.visible
                             && !keyboard_closed_at
                                 .is_some_and(|closed| closed.elapsed() < Duration::from_secs(1)))
@@ -128,18 +128,18 @@ pub fn run(config_path: impl AsRef<Path>, socket_path: impl AsRef<Path>) -> Resu
                         Response::Error {
                             message: "keyboard session is no longer active".into(),
                         }
-                    } else if !is_keyboard_key(KeyCode::new(code)) {
+                    } else if !is_keyboard_key(KeyCode::new(*code)) {
                         Response::Error {
                             message: format!("invalid keyboard code {code}"),
                         }
                     } else {
-                        outputs.key(KeyCode::new(code), shift)?;
+                        outputs.key(KeyCode::new(*code), *shift)?;
                         Response::Done
                     }
                 }
                 Request::Osk => unreachable!(),
             };
-            let _ = command.reply.send(response);
+            ipc.respond(command, response);
         }
 
         let mut received = false;

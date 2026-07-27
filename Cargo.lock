@@ -654,6 +654,7 @@ version = "0.1.0"
 dependencies = [
  "blit",
  "blit-cpu",
+ "calloop",
  "clap",
  "env_logger",
  "evdev",
