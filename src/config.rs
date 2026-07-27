@@ -268,9 +268,6 @@ impl Config {
             Action::ModeSet { name } if !self.modes.contains_key(name) => Err(Error::message(
                 format!("invalid configuration: mode-set target {name:?} is not configured"),
             )),
-            Action::Event { name } if name.trim().is_empty() => Err(Error::message(
-                "invalid configuration: event name must not be empty",
-            )),
             Action::KeyboardToggle if !global => Err(Error::message(
                 "invalid configuration: keyboard-toggle is only valid for global bindings",
             )),
@@ -381,9 +378,6 @@ pub enum Action {
     },
     ModeNext,
     KeyboardToggle,
-    Event {
-        name: String,
-    },
 }
 
 fn deserialize_key<'de, D>(deserializer: D) -> Result<KeyCode, D::Error>
@@ -576,7 +570,7 @@ mod tests {
 
                 [[global.bindings]]
                 chord = ["steam", "x"]
-                action = { type = "event", name = "keyboard.toggle" }
+                action = { type = "keyboard-toggle" }
 
                 [modes.desktop]
                 [[modes.desktop.bindings]]

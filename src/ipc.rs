@@ -9,7 +9,6 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, SyncSender};
 use std::thread;
-use tokio::sync::{broadcast, watch};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Status {
@@ -18,11 +17,6 @@ pub struct Status {
     pub battery_percent: Option<u8>,
     pub charging: Option<bool>,
     pub device: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct NamedEvent {
-    pub name: String,
 }
 
 #[derive(Debug, Clone, Copy, clap::ValueEnum, Serialize, Deserialize, PartialEq, Eq)]
@@ -117,12 +111,11 @@ pub const OSK_PAD_LIMIT: f32 = 5.0 / 6.0;
 
 pub struct Server {
     path: PathBuf,
-    events: EventPublisher,
     osk: OskPublisher,
+    osk_current: OskState,
 }
 
-type EventPublisher = broadcast::Sender<NamedEvent>;
-type OskPublisher = watch::Sender<OskState>;
+type OskPublisher = watch::WatchSender<OskState>;
 
 pub struct ControlCommand {
     pub request: Request,
@@ -132,10 +125,6 @@ pub struct ControlCommand {
 #[derive(Clone)]
 pub struct Client {
     path: PathBuf,
-}
-
-pub struct EventStream {
-    lines: std::io::Lines<BufReader<UnixStream>>,
 }
 
 pub struct OskStream {
@@ -155,7 +144,6 @@ pub enum Request {
         sound: HapticSound,
     },
     Reload,
-    Events,
     Osk,
     OskHide {
         session: u64,
@@ -173,7 +161,6 @@ pub enum Response {
     Status { status: Status },
     Mode { name: String },
     Done,
-    Event { event: NamedEvent },
     Error { message: String },
 }
 
@@ -317,8 +304,6 @@ impl Server {
 
         let listener = UnixListener::bind(&path).whence()?;
         fs::set_permissions(&path, fs::Permissions::from_mode(0o660)).whence()?;
-        let (events, _) = broadcast::channel(32);
-        let publisher = events.clone();
         let (osk, _) = watch::channel(OskState::default());
         let osk_publisher = osk.clone();
         let (commands, receiver) = mpsc::sync_channel(32);
@@ -330,11 +315,10 @@ impl Server {
                         break;
                     };
                     let commands = commands.clone();
-                    let events = events.clone();
                     let osk = osk.clone();
                     if let Err(error) = thread::Builder::new()
                         .name("scd-client".into())
-                        .spawn(move || handle_client(stream, commands, events, osk))
+                        .spawn(move || handle_client(stream, commands, osk))
                     {
                         log::warn!("could not serve control client: {error}");
                     }
@@ -345,26 +329,18 @@ impl Server {
         Ok((
             Self {
                 path,
-                events: publisher,
                 osk: osk_publisher,
+                osk_current: OskState::default(),
             },
             receiver,
         ))
     }
 
-    pub fn publish_event(&self, name: String) {
-        let _ = self.events.send(NamedEvent { name });
-    }
-
-    pub fn publish_osk(&self, next: OskState) {
-        self.osk.send_if_modified(|current| {
-            if *current == next {
-                false
-            } else {
-                *current = next;
-                true
-            }
-        });
+    pub fn publish_osk(&mut self, next: OskState) {
+        if self.osk_current != next {
+            self.osk_current = next;
+            self.osk.send(next);
+        }
     }
 }
 
@@ -411,15 +387,6 @@ impl Client {
         self.request_done(Request::Reload)
     }
 
-    pub fn events(&self) -> Result<EventStream> {
-        let stream = UnixStream::connect(&self.path).whence()?;
-        serde_json::to_writer(&stream, &Request::Events).whence()?;
-        (&stream).write_all(b"\n").whence()?;
-        Ok(EventStream {
-            lines: BufReader::new(stream).lines(),
-        })
-    }
-
     pub fn osk(&self) -> Result<OskStream> {
         let stream = UnixStream::connect(&self.path).whence()?;
         serde_json::to_writer(&stream, &Request::Osk).whence()?;
@@ -461,22 +428,6 @@ impl Client {
     }
 }
 
-impl Iterator for EventStream {
-    type Item = Result<NamedEvent>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        self.lines.next().map(|line| {
-            let line = line.whence()?;
-            let response: Response = serde_json::from_str(&line).whence()?;
-            match response {
-                Response::Event { event } => Ok(event),
-                Response::Error { message } => Err(Error::message(message)),
-                _ => Err(Error::message("unexpected daemon response")),
-            }
-        })
-    }
-}
-
 impl Iterator for OskStream {
     type Item = Result<OskState>;
 
@@ -488,12 +439,7 @@ impl Iterator for OskStream {
     }
 }
 
-fn handle_client(
-    stream: UnixStream,
-    commands: SyncSender<ControlCommand>,
-    events: EventPublisher,
-    osk: OskPublisher,
-) {
+fn handle_client(stream: UnixStream, commands: SyncSender<ControlCommand>, osk: OskPublisher) {
     let mut request = String::new();
     if BufReader::new(&stream).read_line(&mut request).is_err() {
         return;
@@ -508,47 +454,19 @@ fn handle_client(
         return;
     };
 
-    if matches!(request, Request::Events) {
-        let mut receiver = events.subscribe();
-        drop(events);
-        let mut writer = BufWriter::new(stream);
-        loop {
-            let event = match receiver.blocking_recv() {
-                Ok(event) => event,
-                Err(broadcast::error::RecvError::Lagged(count)) => {
-                    log::warn!("control event client missed {count} events");
-                    continue;
-                }
-                Err(broadcast::error::RecvError::Closed) => break,
-            };
-            if serde_json::to_writer(&mut writer, &Response::Event { event }).is_err()
-                || writer.write_all(b"\n").is_err()
-                || writer.flush().is_err()
-            {
-                break;
-            }
-        }
-        return;
-    }
-
     if matches!(request, Request::Osk) {
         let mut receiver = osk.subscribe();
         drop(osk);
-        let Ok(runtime) = tokio::runtime::Builder::new_current_thread().build() else {
-            return;
-        };
         let mut writer = BufWriter::new(stream);
+        let mut state = receiver.get();
         loop {
-            let state = *receiver.borrow_and_update();
             if serde_json::to_writer(&mut writer, &state).is_err()
                 || writer.write_all(b"\n").is_err()
                 || writer.flush().is_err()
             {
                 break;
             }
-            if runtime.block_on(receiver.changed()).is_err() {
-                break;
-            }
+            state = receiver.wait();
         }
         return;
     }

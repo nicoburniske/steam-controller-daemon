@@ -29,10 +29,10 @@ impl Daemon {
         let mut mapped = Vec::new();
         let mut outputs = Outputs::new()?;
         let mut device = DeviceManager::new(trackpad_click_pressure)?;
-        let (ipc, commands) = Server::bind(&self.socket_path)?;
+        let (mut ipc, commands) = Server::bind(&self.socket_path)?;
         let mut keyboard = OskState::default();
         keyboard.set_bindings(mapper.osk_bindings());
-        Self::publish_keyboard(&mapper, &mut keyboard, &ipc);
+        Self::publish_keyboard(&mapper, &mut keyboard, &mut ipc);
         let mut keyboard_closed_at: Option<Instant> = None;
         let mut battery = None;
         let mut charging = None;
@@ -62,11 +62,10 @@ impl Daemon {
                                 &mut mapped,
                                 &mut mapper,
                                 &mut outputs,
-                                &ipc,
                                 &device,
                                 &mut keyboard,
                             )?;
-                            Self::publish_keyboard(&mapper, &mut keyboard, &ipc);
+                            Self::publish_keyboard(&mapper, &mut keyboard, &mut ipc);
                             Response::Done
                         }
                         Err(error) => Response::Error {
@@ -79,11 +78,10 @@ impl Daemon {
                             &mut mapped,
                             &mut mapper,
                             &mut outputs,
-                            &ipc,
                             &device,
                             &mut keyboard,
                         )?;
-                        Self::publish_keyboard(&mapper, &mut keyboard, &ipc);
+                        Self::publish_keyboard(&mapper, &mut keyboard, &mut ipc);
                         Response::Done
                     }
                     Request::Sound { sound } => match device.play_haptic(sound) {
@@ -101,11 +99,10 @@ impl Daemon {
                                 &mut mapped,
                                 &mut mapper,
                                 &mut outputs,
-                                &ipc,
                                 &device,
                                 &mut keyboard,
                             )?;
-                            Self::publish_keyboard(&mapper, &mut keyboard, &ipc);
+                            Self::publish_keyboard(&mapper, &mut keyboard, &mut ipc);
                             Response::Done
                         }
                         Err(error) => Response::Error {
@@ -123,13 +120,12 @@ impl Daemon {
                                 &mut mapped,
                                 &mut mapper,
                                 &mut outputs,
-                                &ipc,
                                 &device,
                                 &mut keyboard,
                             )?;
                             keyboard.set_visible(false);
                             keyboard_closed_at = None;
-                            Self::publish_keyboard(&mapper, &mut keyboard, &ipc);
+                            Self::publish_keyboard(&mapper, &mut keyboard, &mut ipc);
                             Response::Done
                         }
                     }
@@ -157,7 +153,7 @@ impl Daemon {
                             Response::Done
                         }
                     }
-                    Request::Events | Request::Osk => unreachable!(),
+                    Request::Osk => unreachable!(),
                 };
                 let _ = command.reply.send(response);
             }
@@ -173,7 +169,6 @@ impl Daemon {
                             &mut mapped,
                             &mut mapper,
                             &mut outputs,
-                            &ipc,
                             &device,
                             &mut keyboard,
                         )?;
@@ -214,13 +209,12 @@ impl Daemon {
                             &mut mapped,
                             &mut mapper,
                             &mut outputs,
-                            &ipc,
                             &device,
                             &mut keyboard,
                         )?;
                         keyboard.set_visible(false);
                         keyboard_closed_at = None;
-                        Self::publish_keyboard(&mapper, &mut keyboard, &ipc);
+                        Self::publish_keyboard(&mapper, &mut keyboard, &mut ipc);
                         battery = None;
                         charging = None;
                         log::info!("controller disconnected");
@@ -250,7 +244,6 @@ impl Daemon {
         mapped: &mut Vec<Output>,
         mapper: &mut Mapper,
         outputs: &mut Outputs,
-        ipc: &Server,
         device: &DeviceManager,
         keyboard: &mut OskState,
     ) -> Result<()> {
@@ -264,9 +257,6 @@ impl Daemon {
         }
         for output in mapped.drain(..) {
             match output {
-                Output::Event { name } => {
-                    ipc.publish_event(name);
-                }
                 Output::ModeChanged { name } => {
                     log::info!("active mode: {name}");
                     device.mode_switch_haptic()?;
@@ -285,7 +275,7 @@ impl Daemon {
         }
     }
 
-    fn publish_keyboard(mapper: &Mapper, keyboard: &mut OskState, ipc: &Server) {
+    fn publish_keyboard(mapper: &Mapper, keyboard: &mut OskState, ipc: &mut Server) {
         Self::sync_keyboard(mapper, keyboard);
         ipc.publish_osk(*keyboard);
     }

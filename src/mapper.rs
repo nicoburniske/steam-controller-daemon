@@ -68,9 +68,6 @@ pub enum Output {
         pad: Trackpad,
     },
     KeyboardToggle,
-    Event {
-        name: String,
-    },
     ModeChanged {
         name: String,
     },
@@ -552,12 +549,6 @@ impl Mapper {
                 }
                 None
             }
-            Action::Event { name } => {
-                if active {
-                    outputs.push(Output::Event { name });
-                }
-                None
-            }
         };
         if let Some(held) = held {
             self.set_held(held, active, outputs);
@@ -948,7 +939,7 @@ mod tests {
                 default_mode = "desktop"
                 [[global.bindings]]
                 chord = ["steam", "x"]
-                action = { type = "event", name = "keyboard.toggle" }
+                action = { type = "keyboard-toggle" }
                 [modes.desktop]
                 [[modes.desktop.bindings]]
                 input = "steam"
@@ -971,12 +962,7 @@ mod tests {
             []
         );
         let chord = state_with(&[Button::Steam, Button::Lb, Button::X]);
-        assert_eq!(
-            mapped(&mut mapper, &chord),
-            [Output::Event {
-                name: "keyboard.toggle".to_owned(),
-            }]
-        );
+        assert_eq!(mapped(&mut mapper, &chord), [Output::KeyboardToggle]);
         assert_eq!(mapped(&mut mapper, &chord), []);
         assert_eq!(mapped(&mut mapper, &state_with(&[Button::X])), []);
         assert_eq!(mapped(&mut mapper, &ControllerState::default()), []);
@@ -996,10 +982,9 @@ mod tests {
                 pressed: true
             }]
         );
-        assert!(
-            !mapped(&mut mapper, &state_with(&[Button::X, Button::Steam]))
-                .iter()
-                .any(|output| matches!(output, Output::Event { .. }))
+        assert_eq!(
+            mapped(&mut mapper, &state_with(&[Button::X, Button::Steam])),
+            []
         );
     }
 

@@ -239,10 +239,9 @@ impl Outputs {
                 [RelativeAxisCode::REL_HWHEEL, RelativeAxisCode::REL_WHEEL],
                 [*x, *y],
             ),
-            Output::KeyboardToggle
-            | Output::Event { .. }
-            | Output::ModeChanged { .. }
-            | Output::TrackpadHaptic { .. } => Ok(()),
+            Output::KeyboardToggle | Output::ModeChanged { .. } | Output::TrackpadHaptic { .. } => {
+                Ok(())
+            }
         }
     }
 

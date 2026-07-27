@@ -26,7 +26,6 @@ enum Command {
         sound: Option<HapticSound>,
     },
     Reload,
-    Events,
     Validate {
         #[arg(default_value = "/etc/scd/config.toml")]
         path: PathBuf,
@@ -80,11 +79,6 @@ fn main() -> scd::Result<()> {
             }
         }
         Command::Reload => client.reload()?,
-        Command::Events => {
-            for event in client.events()? {
-                println!("{}", serde_json::to_string(&event?).whence()?);
-            }
-        }
         Command::Validate { path } => {
             Config::load(path)?;
             println!("configuration is valid");
