@@ -14,7 +14,10 @@ rustPlatform.buildRustPackage {
     fileset = lib.fileset.unions [
       ../Cargo.lock
       ../Cargo.toml
-      ../src
+      ../core
+      ../ctl
+      ../daemon
+      ../osk
     ];
   };
 
@@ -22,8 +25,6 @@ rustPlatform.buildRustPackage {
     lockFile = ../Cargo.lock;
     outputHashes."blit-0.1.0" = "sha256-YAac7/WoiC/xNGz+KIOOaqEH6240ml7mvJPIJU6Ew9k=";
   };
-  buildFeatures = ["osk"];
-
   nativeBuildInputs = [pkg-config];
   buildInputs = [udev];
 

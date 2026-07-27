@@ -1,41 +1,19 @@
-[package]
-name = "scd"
+[workspace]
+members = ["core", "daemon", "ctl", "osk"]
+resolver = "3"
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
 
-[dependencies]
-blit = { git = "https://github.com/nicoburniske/blit", rev = "0e10cf45a3da20ef0cc266e30fe0218651aaef1d", optional = true }
-blit-cpu = { git = "https://github.com/nicoburniske/blit", rev = "0e10cf45a3da20ef0cc266e30fe0218651aaef1d", optional = true }
-calloop = "0.14"
+[workspace.dependencies]
 clap = { version = "4.5", features = ["derive"] }
 env_logger = "0.11"
 evdev = "0.13"
-hidapi = { version = "2.6", default-features = false, features = ["linux-native-basic-udev"] }
 indexmap = { version = "2.9", features = ["serde"] }
 log = "0.4"
-libc = "0.2"
+scd = { path = "core" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-smithay-client-toolkit = { version = "0.21.1", default-features = false, features = ["calloop"], optional = true }
 toml = { version = "0.9", features = ["preserve_order"] }
-watch = "0.2"
-
-[features]
-osk = ["dep:blit", "dep:blit-cpu", "dep:smithay-client-toolkit"]
-
-[lib]
-path = "src/lib.rs"
-
-[[bin]]
-name = "scd"
-path = "src/bin/scd/main.rs"
-
-[[bin]]
-name = "scctl"
-path = "src/bin/scctl.rs"
-
-[[bin]]
-name = "scd-osk"
-path = "src/bin/scd-osk/main.rs"
-required-features = ["osk"]

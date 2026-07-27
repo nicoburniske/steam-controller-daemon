@@ -649,11 +649,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "scctl"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "scd",
+ "serde_json",
+]
+
+[[package]]
 name = "scd"
 version = "0.1.0"
 dependencies = [
- "blit",
- "blit-cpu",
+ "evdev",
+ "indexmap",
+ "serde",
+ "serde_json",
+ "toml",
+]
+
+[[package]]
+name = "scd-daemon"
+version = "0.1.0"
+dependencies = [
  "calloop",
  "clap",
  "env_logger",
@@ -662,11 +680,26 @@ dependencies = [
  "indexmap",
  "libc",
  "log",
+ "scd",
  "serde",
  "serde_json",
+ "watch",
+]
+
+[[package]]
+name = "scd-osk"
+version = "0.1.0"
+dependencies = [
+ "blit",
+ "blit-cpu",
+ "clap",
+ "env_logger",
+ "evdev",
+ "log",
+ "scd",
+ "serde",
  "smithay-client-toolkit",
  "toml",
- "watch",
 ]
 
 [[package]]

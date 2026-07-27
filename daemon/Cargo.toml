@@ -1,0 +1,23 @@
+[package]
+name = "scd-daemon"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+calloop = "0.14"
+clap.workspace = true
+env_logger.workspace = true
+evdev.workspace = true
+hidapi = { version = "2.6", default-features = false, features = ["linux-native-basic-udev"] }
+indexmap.workspace = true
+libc = "0.2"
+log.workspace = true
+scd.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+watch = "0.2"
+
+[[bin]]
+name = "scd"
+path = "src/main.rs"

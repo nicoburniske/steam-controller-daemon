@@ -15,9 +15,8 @@ pub struct Status {
     pub device: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, clap::ValueEnum, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
-#[value(rename_all = "kebab-case")]
 pub enum HapticSound {
     ControllerOn,
     ControllerOff,
@@ -143,6 +142,63 @@ pub enum Response {
     Status { status: Status },
     Done,
     Error { message: String },
+}
+
+impl HapticSound {
+    pub const ALL: [Self; 15] = [
+        Self::ControllerOn,
+        Self::ControllerOff,
+        Self::UpFive,
+        Self::DownFive,
+        Self::UpSix,
+        Self::DownSix,
+        Self::WhoopUpThree,
+        Self::WhoopDown,
+        Self::Pulse,
+        Self::ToneLow,
+        Self::ToneHigh,
+        Self::SweepUp,
+        Self::SweepDown,
+        Self::TrillUp,
+        Self::TrillDown,
+    ];
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::ControllerOn => "controller-on",
+            Self::ControllerOff => "controller-off",
+            Self::UpFive => "up-five",
+            Self::DownFive => "down-five",
+            Self::UpSix => "up-six",
+            Self::DownSix => "down-six",
+            Self::WhoopUpThree => "whoop-up-three",
+            Self::WhoopDown => "whoop-down",
+            Self::Pulse => "pulse",
+            Self::ToneLow => "tone-low",
+            Self::ToneHigh => "tone-high",
+            Self::SweepUp => "sweep-up",
+            Self::SweepDown => "sweep-down",
+            Self::TrillUp => "trill-up",
+            Self::TrillDown => "trill-down",
+        }
+    }
+}
+
+impl std::fmt::Display for HapticSound {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for HapticSound {
+    type Err = Error;
+
+    fn from_str(value: &str) -> Result<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|sound| sound.as_str() == value)
+            .ok_or_else(|| Error::message(format!("unknown haptic sound `{value}`")))
+    }
 }
 
 impl OskState {

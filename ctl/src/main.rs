@@ -1,4 +1,4 @@
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Parser, Subcommand};
 use scd::{Client, Config, HapticSound, ResultExt};
 use std::{path::PathBuf, thread, time::Duration};
 
@@ -72,8 +72,8 @@ fn main() -> scd::Result<()> {
         } => client.next_mode()?,
         Command::Sound { sound: Some(sound) } => client.play_sound(sound)?,
         Command::Sound { sound: None } => {
-            for &sound in HapticSound::value_variants() {
-                println!("{}", sound.to_possible_value().unwrap().get_name());
+            for sound in HapticSound::ALL {
+                println!("{sound}");
                 client.play_sound(sound)?;
                 thread::sleep(Duration::from_millis(700));
             }
