@@ -12,7 +12,7 @@ use output::Outputs;
 use scd::Result;
 use scd::config::{Config, is_keyboard_key};
 use scd::ipc::{OskPad, OskPadSide, OskState, Request, Response, Status};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -27,19 +27,16 @@ struct Args {
 
 fn main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
-    let args = Args::parse();
-    run(args.config, args.socket)
-}
-
-fn run(config_path: impl AsRef<Path>, socket_path: impl AsRef<Path>) -> Result<()> {
-    let config_path = config_path.as_ref();
-    let config = Config::load(config_path)?;
-    let trackpad_click_pressure = config.trackpads.click_pressure;
+    let Args {
+        config: config_path,
+        socket,
+    } = Args::parse();
+    let config = Config::load(&config_path)?;
+    let mut device = DeviceManager::new(config.trackpads.click_pressure)?;
     let mut mapper = Mapper::new(config);
     let mut mapped = Vec::new();
     let mut outputs = Outputs::new()?;
-    let mut device = DeviceManager::new(trackpad_click_pressure)?;
-    let (mut ipc, commands) = Server::bind(socket_path)?;
+    let (mut ipc, commands) = Server::bind(socket)?;
     let mut keyboard = OskState::default();
     keyboard.set_bindings(mapper.osk_bindings());
     publish_keyboard(&mapper, &mut keyboard, &mut ipc);
@@ -52,7 +49,7 @@ fn run(config_path: impl AsRef<Path>, socket_path: impl AsRef<Path>) -> Result<(
 
     log::info!("active mode: {}", mapper.active_mode());
     loop {
-        while let Ok(command) = commands.try_recv() {
+        for command in commands.try_iter() {
             let response = match &command.request {
                 Request::Status => Response::Status {
                     status: Status {
@@ -97,7 +94,7 @@ fn run(config_path: impl AsRef<Path>, socket_path: impl AsRef<Path>) -> Result<(
                         message: error.to_string(),
                     },
                 },
-                Request::Reload => match Config::load(config_path) {
+                Request::Reload => match Config::load(&config_path) {
                     Ok(config) => {
                         device.set_trackpad_click_pressure(config.trackpads.click_pressure)?;
                         mapper.reload(config, &mut mapped);
@@ -141,6 +138,7 @@ fn run(config_path: impl AsRef<Path>, socket_path: impl AsRef<Path>) -> Result<(
                     shift,
                     session,
                 } => {
+                    let key = KeyCode::new(*code);
                     if *session == 0
                         || *session != keyboard.session()
                         || (!keyboard.visible
@@ -150,12 +148,12 @@ fn run(config_path: impl AsRef<Path>, socket_path: impl AsRef<Path>) -> Result<(
                         Response::Error {
                             message: "keyboard session is no longer active".into(),
                         }
-                    } else if !is_keyboard_key(KeyCode::new(*code)) {
+                    } else if !is_keyboard_key(key) {
                         Response::Error {
                             message: format!("invalid keyboard code {code}"),
                         }
                     } else {
-                        outputs.key(KeyCode::new(*code), *shift)?;
+                        outputs.key(key, *shift)?;
                         Response::Done
                     }
                 }

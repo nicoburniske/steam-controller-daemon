@@ -13,7 +13,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::rc::Rc;
 use std::sync::mpsc::{self, TrySendError};
 use std::thread;
 
@@ -123,7 +123,7 @@ enum IpcEvent {
 }
 
 struct ClientConnection {
-    stream: Arc<UnixStream>,
+    stream: Rc<UnixStream>,
     registration: RegistrationToken,
     osk: bool,
 }
@@ -131,14 +131,12 @@ struct ClientConnection {
 struct IpcState {
     clients: HashMap<u64, ClientConnection>,
     next_client: u64,
-    osk: Arc<[u8]>,
+    osk: Vec<u8>,
 }
 
 struct ClientReader {
     client: u64,
-    reader: BufReader<UnixStream>,
     request: String,
-    received: bool,
     commands: mpsc::SyncSender<ControlCommand>,
 }
 
@@ -182,9 +180,10 @@ fn run_ipc(
                     log::warn!("could not encode OSK state");
                     return;
                 };
-                state.osk = output.clone();
+                state.osk = output;
+                let osk = &state.osk;
                 state.clients.retain(|_, client| {
-                    if !client.osk || write_message(&client.stream, &output).is_ok() {
+                    if !client.osk || write_message(&client.stream, osk).is_ok() {
                         true
                     } else {
                         handle.remove(client.registration);
@@ -233,32 +232,20 @@ fn accept_clients<'a>(
             log::warn!("could not configure IPC client: {error}");
             continue;
         }
-        let reader = match stream.try_clone() {
-            Ok(reader) => reader,
-            Err(error) => {
-                log::warn!("could not clone IPC client: {error}");
-                continue;
-            }
-        };
-
-        let client = loop {
-            let client = state.next_client;
-            state.next_client = state.next_client.wrapping_add(1).max(1);
-            if !state.clients.contains_key(&client) {
-                break client;
-            }
-        };
-        let stream = Arc::new(stream);
+        let client = state.next_client;
+        state.next_client = state
+            .next_client
+            .checked_add(1)
+            .expect("IPC client ID overflow");
+        let stream = Rc::new(stream);
         let mut reader = ClientReader {
             client,
-            reader: BufReader::new(reader),
             request: String::new(),
-            received: false,
             commands: commands.clone(),
         };
         let registration = match handle.insert_source(
             Generic::new(stream.clone(), Interest::READ, Mode::Level),
-            move |_, _, state| reader.ready(state),
+            move |_, stream, state| Ok(reader.ready(stream, state)),
         ) {
             Ok(registration) => registration,
             Err(error) => {
@@ -278,77 +265,57 @@ fn accept_clients<'a>(
 }
 
 impl ClientReader {
-    fn ready(&mut self, state: &mut IpcState) -> std::io::Result<PostAction> {
-        if self.received {
-            let mut buffer = [0; 4096];
-            return Ok(match self.reader.read(&mut buffer) {
-                Ok(0) => self.close(state),
-                Ok(_) => PostAction::Continue,
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    PostAction::Continue
-                }
-                Err(_) => self.close(state),
-            });
-        }
-
+    fn ready(&mut self, stream: &UnixStream, state: &mut IpcState) -> PostAction {
         let remaining = 64 * 1024 + 1 - self.request.len();
-        let read = self
-            .reader
-            .by_ref()
+        match BufReader::new(stream)
             .take(remaining as u64)
-            .read_line(&mut self.request);
-        if self.request.len() > 64 * 1024 {
-            self.error("request is too large");
-            return Ok(self.close(state));
-        }
-        match read {
-            Ok(0) => return Ok(self.close(state)),
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                return Ok(PostAction::Continue);
+            .read_line(&mut self.request)
+        {
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => PostAction::Continue,
+            Err(_) => self.reject(stream, state, "invalid request"),
+            Ok(0) => self.close(state),
+            Ok(_) if self.request.len() > 64 * 1024 => {
+                self.reject(stream, state, "request is too large")
             }
-            Err(_) => {
-                self.error("invalid request");
-                return Ok(self.close(state));
-            }
-            Ok(_) if !self.request.ends_with('\n') => return Ok(self.close(state)),
-            Ok(_) => {}
-        }
-
-        self.received = true;
-        match serde_json::from_str::<Request>(&self.request) {
-            Ok(Request::Osk) => {
-                let Some(client) = state.clients.get_mut(&self.client) else {
-                    return Ok(PostAction::Remove);
-                };
-                client.osk = true;
-                if write_message(self.reader.get_ref(), &state.osk).is_ok() {
-                    return Ok(PostAction::Continue);
-                }
-            }
-            Ok(request) => {
-                let command = ControlCommand {
-                    request,
-                    client: self.client,
-                };
-                match self.commands.try_send(command) {
-                    Ok(()) => return Ok(PostAction::Continue),
-                    Err(TrySendError::Full(_)) => {
-                        self.error("daemon command queue is full");
+            Ok(_) if !self.request.ends_with('\n') => self.close(state),
+            Ok(_) => match serde_json::from_str::<Request>(&self.request) {
+                Ok(Request::Osk) => {
+                    state
+                        .clients
+                        .get_mut(&self.client)
+                        .expect("registered IPC client exists")
+                        .osk = true;
+                    if write_message(stream, &state.osk).is_ok() {
+                        PostAction::Continue
+                    } else {
+                        self.close(state)
                     }
-                    Err(TrySendError::Disconnected(_)) => {}
                 }
-            }
-            Err(_) => self.error("invalid request"),
+                Ok(request) => {
+                    let command = ControlCommand {
+                        request,
+                        client: self.client,
+                    };
+                    match self.commands.try_send(command) {
+                        Ok(()) => PostAction::Disable,
+                        Err(TrySendError::Full(_)) => {
+                            self.reject(stream, state, "daemon command queue is full")
+                        }
+                        Err(TrySendError::Disconnected(_)) => self.close(state),
+                    }
+                }
+                Err(_) => self.reject(stream, state, "invalid request"),
+            },
         }
-        Ok(self.close(state))
     }
 
-    fn error(&self, message: &str) {
+    fn reject(&self, stream: &UnixStream, state: &mut IpcState, message: &str) -> PostAction {
         if let Ok(output) = json_line(&Response::Error {
             message: message.into(),
         }) {
-            let _ = write_message(self.reader.get_ref(), &output);
+            let _ = write_message(stream, &output);
         }
+        self.close(state)
     }
 
     fn close(&self, state: &mut IpcState) -> PostAction {
@@ -357,10 +324,10 @@ impl ClientReader {
     }
 }
 
-fn json_line(value: &impl Serialize) -> std::io::Result<Arc<[u8]>> {
+fn json_line(value: &impl Serialize) -> std::io::Result<Vec<u8>> {
     let mut output = serde_json::to_vec(value).map_err(std::io::Error::other)?;
     output.push(b'\n');
-    Ok(output.into())
+    Ok(output)
 }
 
 fn write_message(stream: &UnixStream, message: &[u8]) -> std::io::Result<()> {
