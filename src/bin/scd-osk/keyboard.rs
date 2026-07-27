@@ -461,6 +461,10 @@ impl Keyboard {
         self.pressed[usize::from(half == Half::Right)]
     }
 
+    pub fn visible(&self) -> bool {
+        self.visible
+    }
+
     pub fn bindings(&self) -> OskBindings {
         self.bindings
     }

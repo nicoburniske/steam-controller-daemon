@@ -135,7 +135,6 @@ pub struct OskStream {
 #[serde(tag = "command", rename_all = "kebab-case")]
 pub enum Request {
     Status,
-    Mode,
     ModeSet {
         name: String,
     },
@@ -159,7 +158,6 @@ pub enum Request {
 #[serde(tag = "type", rename_all = "kebab-case")]
 pub enum Response {
     Status { status: Status },
-    Mode { name: String },
     Done,
     Error { message: String },
 }
@@ -360,13 +358,6 @@ impl Client {
     pub fn status(&self) -> Result<Status> {
         match self.request(Request::Status)? {
             Response::Status { status } => Ok(status),
-            _ => Err(Error::message("unexpected daemon response")),
-        }
-    }
-
-    pub fn mode(&self) -> Result<String> {
-        match self.request(Request::Mode)? {
-            Response::Mode { name } => Ok(name),
             _ => Err(Error::message("unexpected daemon response")),
         }
     }

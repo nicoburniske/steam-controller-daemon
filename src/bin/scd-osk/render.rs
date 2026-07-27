@@ -26,9 +26,6 @@ const BORDER_WIDTH: f32 = 2.0;
 pub struct KeyboardRenderer {
     runtime: Runtime<BlitPlatform>,
     theme: Theme,
-    logical_size: [u32; 2],
-    physical_size: [u32; 2],
-    scale: u32,
     started_at: Instant,
 }
 
@@ -66,27 +63,24 @@ impl KeyboardRenderer {
         Ok(Self {
             runtime: Runtime::new(BlitPlatform { renderer }),
             theme,
-            logical_size: [width, height],
-            physical_size: [physical_width, physical_height],
-            scale,
             started_at: Instant::now(),
         })
     }
 
     pub fn resize(&mut self, width: u32, height: u32, scale: u32) -> Result<()> {
-        if [width, height] == self.logical_size && scale == self.scale {
-            return Ok(());
-        }
         let [physical_width, physical_height] = scaled_size(width, height, scale)?;
         let platform = self.runtime.platform();
+        let screen = platform.renderer.screen();
+        if [screen.width as u32, screen.height as u32] == [physical_width, physical_height]
+            && platform.renderer.scale_factor() == scale as f32
+        {
+            return Ok(());
+        }
         platform
             .renderer
             .buffer_mut()
             .resize(physical_width as usize, physical_height as usize);
         platform.renderer.set_scale_factor(scale as f32);
-        self.logical_size = [width, height];
-        self.physical_size = [physical_width, physical_height];
-        self.scale = scale;
         self.runtime.refresh_screen();
         self.runtime.invalidate_all();
         Ok(())
@@ -349,8 +343,9 @@ impl KeyboardRenderer {
         self.runtime.platform().renderer.buffer().pixels()
     }
 
-    pub fn physical_size(&self) -> [u32; 2] {
-        self.physical_size
+    pub fn physical_size(&mut self) -> [u32; 2] {
+        let screen = self.runtime.platform().renderer.screen();
+        [screen.width as u32, screen.height as u32]
     }
 }
 

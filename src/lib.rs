@@ -14,4 +14,4 @@ pub use ipc::{
     OskStream, Status,
 };
 pub use protocol::Button as ControllerButton;
-pub use runtime::Daemon;
+pub use runtime::run;

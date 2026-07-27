@@ -123,7 +123,6 @@ pub fn run(socket: PathBuf, font: Box<[u8]>, theme: Theme) -> Result<()> {
         width: WIDTH,
         height: HEIGHT,
         scale: 1,
-        visible: false,
         configured: false,
         frame_pending: false,
         redraw_pending: false,
@@ -159,7 +158,6 @@ struct State {
     width: u32,
     height: u32,
     scale: u32,
-    visible: bool,
     configured: bool,
     frame_pending: bool,
     redraw_pending: bool,
@@ -168,17 +166,16 @@ struct State {
 
 impl State {
     fn input(&mut self, input: OskState) {
+        let was_visible = self.keyboard.visible();
         let changed = self.keyboard.update(input, &self.key_output);
-        match (self.visible, input.visible) {
+        match (was_visible, input.visible) {
             (false, true) => {
-                self.visible = true;
                 if let Err(error) = self.show() {
                     log::error!("could not show keyboard: {error}");
                     self.exit = true;
                 }
             }
             (true, false) => {
-                self.visible = false;
                 self.hide();
             }
             (true, true) if changed => {
@@ -193,9 +190,9 @@ impl State {
     }
 
     fn disconnected(&mut self) {
+        let was_visible = self.keyboard.visible();
         self.keyboard.disconnect();
-        if self.visible {
-            self.visible = false;
+        if was_visible {
             self.hide();
         }
     }
@@ -228,7 +225,11 @@ impl State {
     }
 
     fn redraw(&mut self) -> Result<()> {
-        if !self.visible || !self.configured || self.frame_pending || !self.redraw_pending {
+        if !self.keyboard.visible()
+            || !self.configured
+            || self.frame_pending
+            || !self.redraw_pending
+        {
             return Ok(());
         }
         self.renderer.render(&self.keyboard);
@@ -379,7 +380,7 @@ impl LayerShellHandler for State {
         configure: LayerSurfaceConfigure,
         _: u32,
     ) {
-        if !self.visible {
+        if !self.keyboard.visible() {
             return;
         }
         let width = if configure.new_size.0 == 0 {

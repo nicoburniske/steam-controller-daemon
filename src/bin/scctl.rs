@@ -63,7 +63,7 @@ fn main() -> scd::Result<()> {
                 );
             }
         }
-        Command::Mode { action: None } => println!("{}", client.mode()?),
+        Command::Mode { action: None } => println!("{}", client.status()?.mode),
         Command::Mode {
             action: Some(ModeAction::Set { name }),
         } => client.set_mode(name)?,
