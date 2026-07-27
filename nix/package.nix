@@ -1,6 +1,5 @@
 {
   lib,
-  inter,
   pkg-config,
   rustPlatform,
   udev,
@@ -29,8 +28,6 @@ rustPlatform.buildRustPackage {
   buildInputs = [udev];
 
   RUSTC_BOOTSTRAP = "1";
-  SCD_OSK_FONT = "${inter}/share/fonts/truetype/InterVariable.ttf";
-
   meta = {
     description = "Steam Controller userspace daemon";
     mainProgram = "scd";

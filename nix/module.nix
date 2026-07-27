@@ -39,8 +39,8 @@ in {
 
     osk.font = lib.mkOption {
       type = lib.types.nullOr lib.types.path;
-      default = null;
-      description = "Optional font file passed to the on-screen keyboard.";
+      default = "${pkgs.jetbrains-mono}/share/fonts/truetype/JetBrainsMono[wght].ttf";
+      description = "Font file passed to the on-screen keyboard, or null to use its configuration.";
     };
   };
 

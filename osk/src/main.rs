@@ -11,7 +11,7 @@ use scd::{ControllerButton, Error, OskPad, OskState, Result, ResultExt};
 use std::{
     env, fs,
     io::{BufWriter, Write},
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::mpsc,
 };
 use theme::Theme;
@@ -50,8 +50,7 @@ fn main() -> Result<()> {
         .font
         .as_deref()
         .or(theme.font.as_deref())
-        .or_else(|| option_env!("SCD_OSK_FONT").map(Path::new))
-        .ok_or_else(|| Error::message("pass --font or build with SCD_OSK_FONT"))?;
+        .ok_or_else(|| Error::message("pass --font or configure font in osk.toml"))?;
     let font = fs::read(font_path).whence()?.into_boxed_slice();
     let width = args.width.unwrap_or(theme.width);
     let height = args.height.unwrap_or(theme.height);

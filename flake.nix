@@ -39,7 +39,6 @@
         ];
         buildInputs = [pkgs.udev];
         RUSTC_BOOTSTRAP = "1";
-        SCD_OSK_FONT = "${pkgs.inter}/share/fonts/truetype/InterVariable.ttf";
       };
     });
 
