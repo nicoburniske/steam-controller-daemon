@@ -1584,6 +1584,9 @@ mod tests {
                 default_mode = "one"
                 [modes.one]
                 [[modes.one.axes]]
+                source = "right-pad"
+                target = "mouse-motion"
+                [[modes.one.axes]]
                 source = "gyro"
                 target = "mouse-motion"
                 sensitivity = 100.0

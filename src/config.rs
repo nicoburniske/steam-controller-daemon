@@ -247,7 +247,9 @@ impl Config {
                     .any(|earlier| earlier.target == mapping.target)
                     && !matches!(
                         mapping.target,
-                        AnalogTarget::GamepadLeftStick | AnalogTarget::GamepadRightStick
+                        AnalogTarget::GamepadLeftStick
+                            | AnalogTarget::GamepadRightStick
+                            | AnalogTarget::MouseMotion
                     )
                 {
                     return Err(Error::message(format!(
