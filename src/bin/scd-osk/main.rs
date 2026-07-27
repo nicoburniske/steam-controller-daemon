@@ -87,7 +87,11 @@ fn main() -> Result<()> {
         write!(output, "P6\n{} {}\n255\n", args.width, args.height).whence()?;
         for pixel in renderer.pixels() {
             output
-                .write_all(&[(pixel.0 >> 16) as u8, (pixel.0 >> 8) as u8, pixel.0 as u8])
+                .write_all(&[
+                    (pixel.raw() >> 16) as u8,
+                    (pixel.raw() >> 8) as u8,
+                    pixel.raw() as u8,
+                ])
                 .whence()?;
         }
         output.flush().whence()?;

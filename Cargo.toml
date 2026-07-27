@@ -5,8 +5,8 @@ edition = "2024"
 rust-version = "1.85"
 
 [dependencies]
-blit = { git = "https://github.com/nicoburniske/blit", rev = "a0eba1db8d68eef71de6040bcba36443d62e2983", optional = true }
-blit-cpu = { git = "https://github.com/nicoburniske/blit", rev = "a0eba1db8d68eef71de6040bcba36443d62e2983", optional = true }
+blit = { git = "https://github.com/nicoburniske/blit", rev = "cf2da4f62731be3a3792e9e2a807b63811b9b4b6", optional = true }
+blit-cpu = { git = "https://github.com/nicoburniske/blit", rev = "cf2da4f62731be3a3792e9e2a807b63811b9b4b6", optional = true }
 clap = { version = "4.5", features = ["derive"] }
 env_logger = "0.11"
 evdev = "0.13"

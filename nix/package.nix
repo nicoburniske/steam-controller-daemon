@@ -20,7 +20,7 @@ rustPlatform.buildRustPackage {
 
   cargoLock = {
     lockFile = ../Cargo.lock;
-    outputHashes."blit-0.1.0" = "sha256-K3ZvWTqrkGw06SRa59w0etwhdcW4rpqRedW9l3wcP9w=";
+    outputHashes."blit-0.1.0" = "sha256-SwYSigr17ruRk6jfm13oY/g0a0m9Mr1j6zR6+uMhcvw=";
   };
   buildFeatures = ["osk"];
 

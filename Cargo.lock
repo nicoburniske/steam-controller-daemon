@@ -112,7 +112,7 @@ dependencies = [
 [[package]]
 name = "blit"
 version = "0.1.0"
-source = "git+https://github.com/nicoburniske/blit?rev=a0eba1db8d68eef71de6040bcba36443d62e2983#a0eba1db8d68eef71de6040bcba36443d62e2983"
+source = "git+https://github.com/nicoburniske/blit?rev=cf2da4f62731be3a3792e9e2a807b63811b9b4b6#cf2da4f62731be3a3792e9e2a807b63811b9b4b6"
 dependencies = [
  "unicode-segmentation",
 ]
@@ -120,7 +120,7 @@ dependencies = [
 [[package]]
 name = "blit-cpu"
 version = "0.1.0"
-source = "git+https://github.com/nicoburniske/blit?rev=a0eba1db8d68eef71de6040bcba36443d62e2983#a0eba1db8d68eef71de6040bcba36443d62e2983"
+source = "git+https://github.com/nicoburniske/blit?rev=cf2da4f62731be3a3792e9e2a807b63811b9b4b6#cf2da4f62731be3a3792e9e2a807b63811b9b4b6"
 dependencies = [
  "blit",
  "blit-font",
@@ -131,7 +131,7 @@ dependencies = [
 [[package]]
 name = "blit-font"
 version = "0.1.0"
-source = "git+https://github.com/nicoburniske/blit?rev=a0eba1db8d68eef71de6040bcba36443d62e2983#a0eba1db8d68eef71de6040bcba36443d62e2983"
+source = "git+https://github.com/nicoburniske/blit?rev=cf2da4f62731be3a3792e9e2a807b63811b9b4b6#cf2da4f62731be3a3792e9e2a807b63811b9b4b6"
 dependencies = [
  "blit",
  "ttf-parser",
@@ -141,7 +141,7 @@ dependencies = [
 [[package]]
 name = "blit_cache"
 version = "0.1.0"
-source = "git+https://github.com/nicoburniske/blit?rev=a0eba1db8d68eef71de6040bcba36443d62e2983#a0eba1db8d68eef71de6040bcba36443d62e2983"
+source = "git+https://github.com/nicoburniske/blit?rev=cf2da4f62731be3a3792e9e2a807b63811b9b4b6#cf2da4f62731be3a3792e9e2a807b63811b9b4b6"
 dependencies = [
  "hashbrown 0.14.5",
 ]

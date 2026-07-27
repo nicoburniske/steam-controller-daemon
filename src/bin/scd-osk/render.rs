@@ -14,9 +14,7 @@ use blit::{
     resource::{ImageData, ImageId, StringData, StringId},
     widget::Button,
 };
-use blit_cpu::{
-    Font, FontFace, Pixel, PremultipliedRgbaColor, Renderer, RendererConfig, Scanline, VecBuffer,
-};
+use blit_cpu::{Argb8888, Font, FontFace, Renderer, RendererConfig, Scanline, VecBuffer};
 use evdev::KeyCode;
 use scd::{ControllerButton, Error, Result, ResultExt};
 use std::hash::Hash;
@@ -35,11 +33,8 @@ pub struct KeyboardRenderer {
 }
 
 struct BlitPlatform {
-    renderer: Renderer<VecBuffer<ArgbPixel>, Scanline>,
+    renderer: Renderer<VecBuffer<Argb8888>, Scanline>,
 }
-
-#[derive(Clone, Copy, Default)]
-pub struct ArgbPixel(pub u32);
 
 #[derive(Clone, Copy)]
 enum ControllerHint {
@@ -353,31 +348,12 @@ impl KeyboardRenderer {
         self.runtime.has_pending_redraw()
     }
 
-    pub fn pixels(&mut self) -> &[ArgbPixel] {
+    pub fn pixels(&mut self) -> &[Argb8888] {
         self.runtime.platform().renderer.buffer().pixels()
     }
 
     pub fn physical_size(&self) -> [u32; 2] {
         self.physical_size
-    }
-}
-
-impl Pixel for ArgbPixel {
-    fn blend_translucent(&mut self, color: PremultipliedRgbaColor) {
-        let inverse = 255 - color.alpha as u32;
-        let alpha = (self.0 >> 24) * inverse / 255 + color.alpha as u32;
-        let red = (self.0 >> 16 & 0xff) * inverse / 255 + color.red as u32;
-        let green = (self.0 >> 8 & 0xff) * inverse / 255 + color.green as u32;
-        let blue = (self.0 & 0xff) * inverse / 255 + color.blue as u32;
-        self.0 = alpha << 24 | red << 16 | green << 8 | blue;
-    }
-
-    fn from_rgb(red: u8, green: u8, blue: u8) -> Self {
-        Self(0xff00_0000 | (red as u32) << 16 | (green as u32) << 8 | blue as u32)
-    }
-
-    fn background() -> Self {
-        Self(0)
     }
 }
 
@@ -505,7 +481,7 @@ impl PlatformImpl for BlitPlatform {
             let top = (damage.y - screen.y) as usize;
             for row in top..top + damage.height as usize {
                 let start = row * width + left;
-                pixels[start..start + damage.width as usize].fill(ArgbPixel::default());
+                pixels[start..start + damage.width as usize].fill(Argb8888::from_raw(0));
             }
         }
         self.renderer.render(paint, damage);

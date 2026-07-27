@@ -275,7 +275,7 @@ impl State {
             ));
         }
         for (target, pixel) in canvas.chunks_exact_mut(4).zip(pixels) {
-            target.copy_from_slice(&pixel.0.to_le_bytes());
+            target.copy_from_slice(&pixel.raw().to_le_bytes());
         }
 
         self.layer
