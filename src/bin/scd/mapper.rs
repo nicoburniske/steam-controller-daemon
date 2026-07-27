@@ -1,7 +1,7 @@
 use evdev::KeyCode;
 use indexmap::IndexMap;
 
-use crate::{
+use scd::{
     Error, Result,
     config::{
         Action, AnalogSource, AnalogTarget, AxisActivation, AxisComponent, AxisMapping, Config,
@@ -500,7 +500,7 @@ impl Mapper {
             .filter(|input| self.osk_active.contains(*input))
     }
 
-    fn mode(&self) -> &crate::config::Mode {
+    fn mode(&self) -> &scd::config::Mode {
         self.config
             .modes
             .get_index(self.active_mode)

@@ -1,13 +1,13 @@
-use crate::ipc::HapticSound;
-use crate::protocol::{
+use hidapi::{HidApi, HidDevice};
+use scd::HapticSound;
+use scd::protocol::{
     ControllerState, Haptic, PROTEUS_PRODUCT_ID, Report, Trackpad, VALVE_VENDOR_ID,
     imu_mode_report, lizard_mode_report, parse_report, trackpad_click_pressure_report,
 };
-use hidapi::{HidApi, HidDevice};
 use std::ffi::CString;
 use std::time::{Duration, Instant};
 
-use crate::{Result, ResultExt};
+use scd::{Result, ResultExt};
 
 pub struct DeviceManager {
     api: HidApi,

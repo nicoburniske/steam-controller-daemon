@@ -5,9 +5,9 @@ use evdev::{
 };
 use std::os::fd::AsRawFd;
 
-use crate::config::{GamepadButton, MouseButton, is_keyboard_key};
 use crate::mapper::{GamepadAxis, Output};
-use crate::{Error, Result, ResultExt};
+use scd::config::{GamepadButton, MouseButton, is_keyboard_key};
+use scd::{Error, Result, ResultExt};
 
 pub struct Outputs {
     gamepad: VirtualDevice,

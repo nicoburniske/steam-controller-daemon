@@ -29,7 +29,7 @@ path = "src/lib.rs"
 
 [[bin]]
 name = "scd"
-path = "src/bin/scd.rs"
+path = "src/bin/scd/main.rs"
 
 [[bin]]
 name = "scctl"

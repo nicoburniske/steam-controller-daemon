@@ -1,11 +1,7 @@
-mod config;
-mod device;
+pub mod config;
 mod error;
-mod ipc;
-mod mapper;
-mod output;
-mod protocol;
-mod runtime;
+pub mod ipc;
+pub mod protocol;
 
 pub use config::Config;
 pub use error::{Error, Result, ResultExt};
@@ -14,4 +10,3 @@ pub use ipc::{
     OskStream, Status,
 };
 pub use protocol::Button as ControllerButton;
-pub use runtime::run;

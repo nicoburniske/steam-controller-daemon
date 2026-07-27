@@ -1,15 +1,37 @@
-use crate::Result;
-use crate::config::{Config, is_keyboard_key};
-use crate::device::{DeviceEvent, DeviceManager};
-use crate::ipc::{OskPadSide, OskState, Request, Response, Server, Status};
-use crate::mapper::{Mapper, Output};
-use crate::output::Outputs;
+mod device;
+mod ipc;
+mod mapper;
+mod output;
+
+use clap::Parser;
+use device::{DeviceEvent, DeviceManager};
 use evdev::KeyCode;
-use std::path::Path;
+use ipc::Server;
+use mapper::{Mapper, Output};
+use output::Outputs;
+use scd::Result;
+use scd::config::{Config, is_keyboard_key};
+use scd::ipc::{OskPad, OskPadSide, OskState, Request, Response, Status};
+use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
 
-pub fn run(config_path: impl AsRef<Path>, socket_path: impl AsRef<Path>) -> Result<()> {
+#[derive(Parser)]
+#[command(version, about = "Steam Controller userspace daemon")]
+struct Args {
+    #[arg(long, default_value = "/etc/scd/config.toml")]
+    config: PathBuf,
+    #[arg(long, default_value = "/run/scd/control.sock")]
+    socket: PathBuf,
+}
+
+fn main() -> Result<()> {
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    let args = Args::parse();
+    run(args.config, args.socket)
+}
+
+fn run(config_path: impl AsRef<Path>, socket_path: impl AsRef<Path>) -> Result<()> {
     let config_path = config_path.as_ref();
     let config = Config::load(config_path)?;
     let trackpad_click_pressure = config.trackpads.click_pressure;
@@ -169,7 +191,7 @@ pub fn run(config_path: impl AsRef<Path>, socket_path: impl AsRef<Path>) -> Resu
                         ] {
                             keyboard.update_pad(
                                 side,
-                                crate::ipc::OskPad {
+                                OskPad {
                                     touched: source.touched,
                                     pressed: source.clicked,
                                     position: source.position,
