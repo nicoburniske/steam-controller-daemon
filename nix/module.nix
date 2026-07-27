@@ -5,17 +5,13 @@
   ...
 }: let
   cfg = config.services.scd;
-  udevRules = pkgs.writeTextFile {
-    name = "scd-udev-rules";
-    destination = "/lib/udev/rules.d/72-scd.rules";
-    text = ''
-      SUBSYSTEM=="misc", KERNEL=="uinput", TAG-="uaccess", OWNER:="root", GROUP:="uinput", MODE:="0660"
-      SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="28de", ATTR{idProduct}=="1304", TAG-="uaccess", OWNER:="root", GROUP:="scd", MODE:="0660"
-      SUBSYSTEM=="hidraw", KERNEL=="hidraw*", ATTRS{idVendor}=="28de", ATTRS{idProduct}=="1304", TAG-="uaccess", OWNER:="root", GROUP:="scd", MODE:="0660"
-      SUBSYSTEM=="tty", ATTRS{idVendor}=="28de", ATTRS{idProduct}=="1304", TAG-="uaccess", OWNER:="root", GROUP:="root", MODE:="0000"
-      SUBSYSTEM=="input", ATTRS{id/vendor}=="28de", ATTRS{id/product}=="1304", TAG-="uaccess", OWNER:="root", GROUP:="root", MODE:="0000", ENV{LIBINPUT_IGNORE_DEVICE}="1"
-    '';
-  };
+  udevRules = pkgs.writeTextDir "lib/udev/rules.d/72-scd.rules" ''
+    SUBSYSTEM=="misc", KERNEL=="uinput", TAG-="uaccess", OWNER:="root", GROUP:="uinput", MODE:="0660"
+    SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="28de", ATTR{idProduct}=="1304", TAG-="uaccess", OWNER:="scd", GROUP:="scd-control", MODE:="0600"
+    TEST!="/run/scd/steam-device", SUBSYSTEM=="hidraw", KERNEL=="hidraw*", ATTRS{idVendor}=="28de", ATTRS{idProduct}=="1304", TAG-="uaccess", OWNER:="root", GROUP:="scd", MODE:="0660"
+    TEST!="/run/scd/steam-device", SUBSYSTEM=="tty", ATTRS{idVendor}=="28de", ATTRS{idProduct}=="1304", TAG-="uaccess", OWNER:="root", GROUP:="root", MODE:="0000"
+    TEST!="/run/scd/steam-device", SUBSYSTEM=="input", ATTRS{id/vendor}=="28de", ATTRS{id/product}=="1304", TAG-="uaccess", OWNER:="root", GROUP:="root", MODE:="0000", ENV{LIBINPUT_IGNORE_DEVICE}="1"
+  '';
 in {
   options.services.scd = {
     enable = lib.mkEnableOption "the Steam Controller userspace daemon";
@@ -45,13 +41,8 @@ in {
   };
 
   config = lib.mkIf cfg.enable {
-    environment = {
-      etc."scd/config.toml" = {
-        source = cfg.configFile;
-        mode = "0444";
-      };
-      systemPackages = [cfg.package];
-    };
+    environment.etc."scd/config.toml".source = cfg.configFile;
+    environment.systemPackages = [cfg.package];
     hardware.uinput.enable = true;
     services.udev.packages = [udevRules];
     users = {
@@ -71,6 +62,7 @@ in {
         after = ["systemd-udevd.service"];
         restartTriggers = [cfg.configFile];
         serviceConfig = {
+          ExecStartPre = "+${pkgs.systemd}/bin/udevadm trigger --settle --action=change --property-match=ID_VENDOR_ID=28de --property-match=ID_MODEL_ID=1304";
           ExecStart = "${lib.getExe' cfg.package "scd"} --config /etc/scd/config.toml --socket /run/scd/control.sock";
           User = "scd";
           Group = "scd-control";
@@ -79,6 +71,7 @@ in {
             "uinput"
           ];
           RuntimeDirectory = "scd";
+          RuntimeDirectoryPreserve = "yes";
           RuntimeDirectoryMode = "0770";
           UMask = "0007";
           Restart = "on-failure";

@@ -2,6 +2,7 @@ mod device;
 mod ipc;
 mod mapper;
 mod output;
+mod steam;
 
 use clap::Parser;
 use device::{DeviceEvent, DeviceManager};
@@ -35,7 +36,7 @@ fn main() -> Result<()> {
     let mut device = DeviceManager::new(config.trackpads.click_pressure)?;
     let mut mapper = Mapper::new(config);
     let mut mapped = Vec::new();
-    let mut outputs = Outputs::new()?;
+    let mut outputs = Outputs::new(!device.steam_enabled())?;
     let (mut ipc, commands) = Server::bind(socket)?;
     let mut keyboard = OskState::default();
     keyboard.set_bindings(mapper.osk_bindings());
@@ -54,6 +55,7 @@ fn main() -> Result<()> {
                 Request::Status => Response::Status {
                     status: Status {
                         connected: device.connected(),
+                        steam: device.steam_enabled(),
                         mode: mapper.active_mode().to_owned(),
                         battery_percent: battery,
                         charging,
@@ -112,6 +114,32 @@ fn main() -> Result<()> {
                     Err(error) => Response::Error {
                         message: error.to_string(),
                     },
+                },
+                Request::Steam { enabled } => match device.set_steam(*enabled) {
+                    Ok(()) => {
+                        if *enabled {
+                            rumble = (0, 0);
+                            mapper.release_all(&mut mapped);
+                            emit(
+                                &mut mapped,
+                                &mut mapper,
+                                &mut outputs,
+                                &device,
+                                &mut keyboard,
+                            )?;
+                            keyboard.set_visible(false);
+                            keyboard_closed_at = None;
+                            publish_keyboard(&mapper, &mut keyboard, &mut ipc);
+                        }
+                        outputs.set_gamepad(!*enabled)?;
+                        Response::Done
+                    }
+                    Err(error) => {
+                        outputs.set_gamepad(!device.steam_enabled())?;
+                        Response::Error {
+                            message: error.to_string(),
+                        }
+                    }
                 },
                 Request::OskHide { session } => {
                     if *session == 0 || *session != keyboard.session() || !keyboard.visible {
@@ -208,6 +236,7 @@ fn main() -> Result<()> {
                     charging = Some(is_charging);
                 }
                 DeviceEvent::Disconnected => {
+                    outputs.set_gamepad(true)?;
                     mapper.release_all(&mut mapped);
                     emit(
                         &mut mapped,
@@ -226,15 +255,23 @@ fn main() -> Result<()> {
             }
         }
 
-        if device.connected() && last_lizard_refresh.elapsed() >= Duration::from_secs(3) {
+        if device.connected()
+            && !device.steam_enabled()
+            && last_lizard_refresh.elapsed() >= Duration::from_secs(3)
+        {
             device.suppress_lizard_mode()?;
             last_lizard_refresh = Instant::now();
         }
         if let Some(next) = outputs.poll_rumble()? {
             rumble = next;
-            device.rumble(rumble.0, rumble.1)?;
+            if !device.steam_enabled() {
+                device.rumble(rumble.0, rumble.1)?;
+            }
             last_rumble = Instant::now();
-        } else if rumble != (0, 0) && last_rumble.elapsed() >= Duration::from_millis(40) {
+        } else if !device.steam_enabled()
+            && rumble != (0, 0)
+            && last_rumble.elapsed() >= Duration::from_millis(40)
+        {
             device.rumble(rumble.0, rumble.1)?;
             last_rumble = Instant::now();
         }

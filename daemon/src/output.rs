@@ -10,7 +10,7 @@ use scd::config::{GamepadButton, MouseButton, is_keyboard_key};
 use scd::{Error, Result, ResultExt};
 
 pub struct Outputs {
-    gamepad: VirtualDevice,
+    gamepad: Option<VirtualDevice>,
     keyboard: VirtualDevice,
     left_shift_held: bool,
     right_shift_held: bool,
@@ -28,7 +28,7 @@ struct RumbleEffects {
 }
 
 impl Outputs {
-    pub fn new() -> Result<Self> {
+    pub fn new(gamepad: bool) -> Result<Self> {
         let mut keyboard_keys = AttributeSet::<KeyCode>::new();
         for code in 1..=0x2ff {
             let key = KeyCode::new(code);
@@ -72,6 +72,205 @@ impl Outputs {
             .build()
             .whence()?;
 
+        Ok(Self {
+            gamepad: gamepad.then(Self::create_gamepad).transpose()?,
+            keyboard,
+            left_shift_held: false,
+            right_shift_held: false,
+            mouse,
+            mouse_remainder: [0.0; 2],
+            scroll_remainder: [0.0; 2],
+            rumble: RumbleEffects::default(),
+        })
+    }
+
+    pub fn set_gamepad(&mut self, enabled: bool) -> Result<()> {
+        if enabled == self.gamepad.is_some() {
+            return Ok(());
+        }
+        self.rumble = RumbleEffects::default();
+        self.gamepad = if enabled {
+            Some(Self::create_gamepad()?)
+        } else {
+            None
+        };
+        Ok(())
+    }
+
+    pub fn emit(&mut self, command: &Output) -> Result<()> {
+        match command {
+            Output::Key { key, pressed } => {
+                self.keyboard
+                    .emit(&[InputEvent::new(
+                        EventType::KEY.0,
+                        key.code(),
+                        i32::from(*pressed),
+                    )])
+                    .whence()?;
+                if *key == KeyCode::KEY_LEFTSHIFT {
+                    self.left_shift_held = *pressed;
+                } else if *key == KeyCode::KEY_RIGHTSHIFT {
+                    self.right_shift_held = *pressed;
+                }
+                Ok(())
+            }
+            Output::MouseButton { button, pressed } => {
+                let code = match button {
+                    MouseButton::Left => KeyCode::BTN_LEFT,
+                    MouseButton::Right => KeyCode::BTN_RIGHT,
+                    MouseButton::Middle => KeyCode::BTN_MIDDLE,
+                    MouseButton::Side => KeyCode::BTN_SIDE,
+                    MouseButton::Extra => KeyCode::BTN_EXTRA,
+                    MouseButton::Forward => KeyCode::BTN_FORWARD,
+                    MouseButton::Back => KeyCode::BTN_BACK,
+                    MouseButton::Task => KeyCode::BTN_TASK,
+                };
+                self.mouse
+                    .emit(&[InputEvent::new(
+                        EventType::KEY.0,
+                        code.code(),
+                        i32::from(*pressed),
+                    )])
+                    .whence()
+            }
+            Output::GamepadButton { button, pressed } => {
+                let Some(gamepad) = &mut self.gamepad else {
+                    return Ok(());
+                };
+                let code = match button {
+                    GamepadButton::South => KeyCode::BTN_SOUTH,
+                    GamepadButton::East => KeyCode::BTN_EAST,
+                    // xbox x/y aliases are BTN_NORTH/BTN_WEST
+                    GamepadButton::North => KeyCode::BTN_WEST,
+                    GamepadButton::West => KeyCode::BTN_NORTH,
+                    GamepadButton::LeftBumper => KeyCode::BTN_TL,
+                    GamepadButton::RightBumper => KeyCode::BTN_TR,
+                    GamepadButton::LeftTrigger => KeyCode::BTN_TL2,
+                    GamepadButton::RightTrigger => KeyCode::BTN_TR2,
+                    GamepadButton::Select => KeyCode::BTN_SELECT,
+                    GamepadButton::Start => KeyCode::BTN_START,
+                    GamepadButton::Guide => KeyCode::BTN_MODE,
+                    GamepadButton::LeftStick => KeyCode::BTN_THUMBL,
+                    GamepadButton::RightStick => KeyCode::BTN_THUMBR,
+                    GamepadButton::DpadUp => KeyCode::BTN_DPAD_UP,
+                    GamepadButton::DpadDown => KeyCode::BTN_DPAD_DOWN,
+                    GamepadButton::DpadLeft => KeyCode::BTN_DPAD_LEFT,
+                    GamepadButton::DpadRight => KeyCode::BTN_DPAD_RIGHT,
+                    GamepadButton::PaddleLeftUpper => KeyCode::BTN_TRIGGER_HAPPY1,
+                    GamepadButton::PaddleLeftLower => KeyCode::BTN_TRIGGER_HAPPY2,
+                    GamepadButton::PaddleRightUpper => KeyCode::BTN_TRIGGER_HAPPY3,
+                    GamepadButton::PaddleRightLower => KeyCode::BTN_TRIGGER_HAPPY4,
+                };
+                gamepad
+                    .emit(&[InputEvent::new(
+                        EventType::KEY.0,
+                        code.code(),
+                        i32::from(*pressed),
+                    )])
+                    .whence()
+            }
+            Output::GamepadAxis { axis, value } => {
+                let Some(gamepad) = &mut self.gamepad else {
+                    return Ok(());
+                };
+                let code = match axis {
+                    GamepadAxis::LeftX => AbsoluteAxisCode::ABS_X,
+                    GamepadAxis::LeftY => AbsoluteAxisCode::ABS_Y,
+                    GamepadAxis::RightX => AbsoluteAxisCode::ABS_RX,
+                    GamepadAxis::RightY => AbsoluteAxisCode::ABS_RY,
+                    GamepadAxis::LeftTrigger => AbsoluteAxisCode::ABS_Z,
+                    GamepadAxis::RightTrigger => AbsoluteAxisCode::ABS_RZ,
+                };
+                let value = if matches!(code, AbsoluteAxisCode::ABS_Z | AbsoluteAxisCode::ABS_RZ) {
+                    (value.clamp(0.0, 1.0) * 32767.0).round() as i32
+                } else {
+                    (value.clamp(-1.0, 1.0) * 32767.0).round() as i32
+                };
+                gamepad
+                    .emit(&[InputEvent::new(EventType::ABSOLUTE.0, code.0, value)])
+                    .whence()
+            }
+            Output::MouseMotion { x, y } => Self::emit_relative(
+                &mut self.mouse,
+                &mut self.mouse_remainder,
+                [RelativeAxisCode::REL_X, RelativeAxisCode::REL_Y],
+                [*x, *y],
+            ),
+            Output::Scroll { x, y } => Self::emit_relative(
+                &mut self.mouse,
+                &mut self.scroll_remainder,
+                [RelativeAxisCode::REL_HWHEEL, RelativeAxisCode::REL_WHEEL],
+                [*x, *y],
+            ),
+            Output::KeyboardToggle | Output::ModeChanged { .. } | Output::TrackpadHaptic { .. } => {
+                Ok(())
+            }
+        }
+    }
+
+    pub fn key(&mut self, key: KeyCode, shift: bool) -> Result<()> {
+        if shift && !self.left_shift_held && !self.right_shift_held {
+            self.keyboard
+                .emit(&[
+                    InputEvent::new(EventType::KEY.0, KeyCode::KEY_LEFTSHIFT.code(), 1),
+                    InputEvent::new(EventType::KEY.0, key.code(), 1),
+                    InputEvent::new(EventType::KEY.0, key.code(), 0),
+                    InputEvent::new(EventType::KEY.0, KeyCode::KEY_LEFTSHIFT.code(), 0),
+                ])
+                .whence()
+        } else {
+            self.keyboard
+                .emit(&[
+                    InputEvent::new(EventType::KEY.0, key.code(), 1),
+                    InputEvent::new(EventType::KEY.0, key.code(), 0),
+                ])
+                .whence()
+        }
+    }
+
+    pub fn poll_rumble(&mut self) -> Result<Option<(u16, u16)>> {
+        let Some(gamepad) = &mut self.gamepad else {
+            return Ok(None);
+        };
+        let events = match gamepad.fetch_events() {
+            Ok(events) => events.collect::<Vec<_>>(),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return Ok(None),
+            Err(error) => return Err(Error::message(error)),
+        };
+        for event in events {
+            match event.destructure() {
+                EventSummary::UInput(event, UInputCode::UI_FF_UPLOAD, ..) => {
+                    let mut upload = gamepad.process_ff_upload(event).whence()?;
+                    let effect = upload.effect();
+                    let rumble = match effect.kind {
+                        FFEffectKind::Rumble {
+                            strong_magnitude,
+                            weak_magnitude,
+                        } => Some((strong_magnitude, weak_magnitude)),
+                        _ => None,
+                    };
+                    if let Some(id) = self.rumble.upload(upload.effect_id(), rumble) {
+                        upload.set_effect_id(id);
+                        upload.set_retval(0);
+                    } else {
+                        upload.set_retval(-1);
+                    }
+                }
+                EventSummary::UInput(event, UInputCode::UI_FF_ERASE, ..) => {
+                    let erase = gamepad.process_ff_erase(event).whence()?;
+                    self.rumble.erase(erase.effect_id() as i16);
+                }
+                EventSummary::ForceFeedback(_, id, repetitions) => {
+                    self.rumble.set_playback(id.0 as i16, repetitions);
+                }
+                _ => {}
+            }
+        }
+
+        Ok(self.rumble.changed_output())
+    }
+
+    fn create_gamepad() -> Result<VirtualDevice> {
         let gamepad_keys = AttributeSet::from_iter([
             KeyCode::BTN_SOUTH,
             KeyCode::BTN_EAST,
@@ -127,181 +326,7 @@ impl Outputs {
         {
             return Err(Error::message(std::io::Error::last_os_error()));
         }
-
-        Ok(Self {
-            gamepad,
-            keyboard,
-            left_shift_held: false,
-            right_shift_held: false,
-            mouse,
-            mouse_remainder: [0.0; 2],
-            scroll_remainder: [0.0; 2],
-            rumble: RumbleEffects::default(),
-        })
-    }
-
-    pub fn emit(&mut self, command: &Output) -> Result<()> {
-        match command {
-            Output::Key { key, pressed } => {
-                self.keyboard
-                    .emit(&[InputEvent::new(
-                        EventType::KEY.0,
-                        key.code(),
-                        i32::from(*pressed),
-                    )])
-                    .whence()?;
-                if *key == KeyCode::KEY_LEFTSHIFT {
-                    self.left_shift_held = *pressed;
-                } else if *key == KeyCode::KEY_RIGHTSHIFT {
-                    self.right_shift_held = *pressed;
-                }
-                Ok(())
-            }
-            Output::MouseButton { button, pressed } => {
-                let code = match button {
-                    MouseButton::Left => KeyCode::BTN_LEFT,
-                    MouseButton::Right => KeyCode::BTN_RIGHT,
-                    MouseButton::Middle => KeyCode::BTN_MIDDLE,
-                    MouseButton::Side => KeyCode::BTN_SIDE,
-                    MouseButton::Extra => KeyCode::BTN_EXTRA,
-                    MouseButton::Forward => KeyCode::BTN_FORWARD,
-                    MouseButton::Back => KeyCode::BTN_BACK,
-                    MouseButton::Task => KeyCode::BTN_TASK,
-                };
-                self.mouse
-                    .emit(&[InputEvent::new(
-                        EventType::KEY.0,
-                        code.code(),
-                        i32::from(*pressed),
-                    )])
-                    .whence()
-            }
-            Output::GamepadButton { button, pressed } => {
-                let code = match button {
-                    GamepadButton::South => KeyCode::BTN_SOUTH,
-                    GamepadButton::East => KeyCode::BTN_EAST,
-                    // xbox x/y aliases are BTN_NORTH/BTN_WEST
-                    GamepadButton::North => KeyCode::BTN_WEST,
-                    GamepadButton::West => KeyCode::BTN_NORTH,
-                    GamepadButton::LeftBumper => KeyCode::BTN_TL,
-                    GamepadButton::RightBumper => KeyCode::BTN_TR,
-                    GamepadButton::LeftTrigger => KeyCode::BTN_TL2,
-                    GamepadButton::RightTrigger => KeyCode::BTN_TR2,
-                    GamepadButton::Select => KeyCode::BTN_SELECT,
-                    GamepadButton::Start => KeyCode::BTN_START,
-                    GamepadButton::Guide => KeyCode::BTN_MODE,
-                    GamepadButton::LeftStick => KeyCode::BTN_THUMBL,
-                    GamepadButton::RightStick => KeyCode::BTN_THUMBR,
-                    GamepadButton::DpadUp => KeyCode::BTN_DPAD_UP,
-                    GamepadButton::DpadDown => KeyCode::BTN_DPAD_DOWN,
-                    GamepadButton::DpadLeft => KeyCode::BTN_DPAD_LEFT,
-                    GamepadButton::DpadRight => KeyCode::BTN_DPAD_RIGHT,
-                    GamepadButton::PaddleLeftUpper => KeyCode::BTN_TRIGGER_HAPPY1,
-                    GamepadButton::PaddleLeftLower => KeyCode::BTN_TRIGGER_HAPPY2,
-                    GamepadButton::PaddleRightUpper => KeyCode::BTN_TRIGGER_HAPPY3,
-                    GamepadButton::PaddleRightLower => KeyCode::BTN_TRIGGER_HAPPY4,
-                };
-                self.gamepad
-                    .emit(&[InputEvent::new(
-                        EventType::KEY.0,
-                        code.code(),
-                        i32::from(*pressed),
-                    )])
-                    .whence()
-            }
-            Output::GamepadAxis { axis, value } => {
-                let code = match axis {
-                    GamepadAxis::LeftX => AbsoluteAxisCode::ABS_X,
-                    GamepadAxis::LeftY => AbsoluteAxisCode::ABS_Y,
-                    GamepadAxis::RightX => AbsoluteAxisCode::ABS_RX,
-                    GamepadAxis::RightY => AbsoluteAxisCode::ABS_RY,
-                    GamepadAxis::LeftTrigger => AbsoluteAxisCode::ABS_Z,
-                    GamepadAxis::RightTrigger => AbsoluteAxisCode::ABS_RZ,
-                };
-                let value = if matches!(code, AbsoluteAxisCode::ABS_Z | AbsoluteAxisCode::ABS_RZ) {
-                    (value.clamp(0.0, 1.0) * 32767.0).round() as i32
-                } else {
-                    (value.clamp(-1.0, 1.0) * 32767.0).round() as i32
-                };
-                self.gamepad
-                    .emit(&[InputEvent::new(EventType::ABSOLUTE.0, code.0, value)])
-                    .whence()
-            }
-            Output::MouseMotion { x, y } => Self::emit_relative(
-                &mut self.mouse,
-                &mut self.mouse_remainder,
-                [RelativeAxisCode::REL_X, RelativeAxisCode::REL_Y],
-                [*x, *y],
-            ),
-            Output::Scroll { x, y } => Self::emit_relative(
-                &mut self.mouse,
-                &mut self.scroll_remainder,
-                [RelativeAxisCode::REL_HWHEEL, RelativeAxisCode::REL_WHEEL],
-                [*x, *y],
-            ),
-            Output::KeyboardToggle | Output::ModeChanged { .. } | Output::TrackpadHaptic { .. } => {
-                Ok(())
-            }
-        }
-    }
-
-    pub fn key(&mut self, key: KeyCode, shift: bool) -> Result<()> {
-        if shift && !self.left_shift_held && !self.right_shift_held {
-            self.keyboard
-                .emit(&[
-                    InputEvent::new(EventType::KEY.0, KeyCode::KEY_LEFTSHIFT.code(), 1),
-                    InputEvent::new(EventType::KEY.0, key.code(), 1),
-                    InputEvent::new(EventType::KEY.0, key.code(), 0),
-                    InputEvent::new(EventType::KEY.0, KeyCode::KEY_LEFTSHIFT.code(), 0),
-                ])
-                .whence()
-        } else {
-            self.keyboard
-                .emit(&[
-                    InputEvent::new(EventType::KEY.0, key.code(), 1),
-                    InputEvent::new(EventType::KEY.0, key.code(), 0),
-                ])
-                .whence()
-        }
-    }
-
-    pub fn poll_rumble(&mut self) -> Result<Option<(u16, u16)>> {
-        let events = match self.gamepad.fetch_events() {
-            Ok(events) => events.collect::<Vec<_>>(),
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return Ok(None),
-            Err(error) => return Err(Error::message(error)),
-        };
-        for event in events {
-            match event.destructure() {
-                EventSummary::UInput(event, UInputCode::UI_FF_UPLOAD, ..) => {
-                    let mut upload = self.gamepad.process_ff_upload(event).whence()?;
-                    let effect = upload.effect();
-                    let rumble = match effect.kind {
-                        FFEffectKind::Rumble {
-                            strong_magnitude,
-                            weak_magnitude,
-                        } => Some((strong_magnitude, weak_magnitude)),
-                        _ => None,
-                    };
-                    if let Some(id) = self.rumble.upload(upload.effect_id(), rumble) {
-                        upload.set_effect_id(id);
-                        upload.set_retval(0);
-                    } else {
-                        upload.set_retval(-1);
-                    }
-                }
-                EventSummary::UInput(event, UInputCode::UI_FF_ERASE, ..) => {
-                    let erase = self.gamepad.process_ff_erase(event).whence()?;
-                    self.rumble.erase(erase.effect_id() as i16);
-                }
-                EventSummary::ForceFeedback(_, id, repetitions) => {
-                    self.rumble.set_playback(id.0 as i16, repetitions);
-                }
-                _ => {}
-            }
-        }
-
-        Ok(self.rumble.changed_output())
+        Ok(gamepad)
     }
 
     fn emit_relative(

@@ -25,6 +25,10 @@ enum Command {
         #[arg(value_enum)]
         sound: Option<HapticSound>,
     },
+    Steam {
+        #[command(subcommand)]
+        action: SteamAction,
+    },
     Reload,
     Validate {
         #[arg(default_value = "/etc/scd/config.toml")]
@@ -38,6 +42,12 @@ enum ModeAction {
     Next,
 }
 
+#[derive(Subcommand)]
+enum SteamAction {
+    Enable,
+    Disable,
+}
+
 fn main() -> scd::Result<()> {
     let args = Args::parse();
     let client = Client::new(args.socket);
@@ -48,6 +58,7 @@ fn main() -> scd::Result<()> {
         Command::Status { json: false } => {
             let status = client.status()?;
             println!("connected: {}", status.connected);
+            println!("steam: {}", status.steam);
             println!("mode: {}", status.mode);
             if let Some(device) = status.device {
                 println!("device: {device}");
@@ -78,6 +89,12 @@ fn main() -> scd::Result<()> {
                 thread::sleep(Duration::from_millis(700));
             }
         }
+        Command::Steam {
+            action: SteamAction::Enable,
+        } => client.set_steam(true)?,
+        Command::Steam {
+            action: SteamAction::Disable,
+        } => client.set_steam(false)?,
         Command::Reload => client.reload()?,
         Command::Validate { path } => {
             Config::load(path)?;

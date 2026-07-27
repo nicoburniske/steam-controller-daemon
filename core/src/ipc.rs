@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Status {
     pub connected: bool,
+    pub steam: bool,
     pub mode: String,
     pub battery_percent: Option<u8>,
     pub charging: Option<bool>,
@@ -125,6 +126,9 @@ pub enum Request {
         sound: HapticSound,
     },
     Reload,
+    Steam {
+        enabled: bool,
+    },
     Osk,
     OskHide {
         session: u64,
@@ -352,6 +356,10 @@ impl Client {
 
     pub fn reload(&self) -> Result<()> {
         self.request_done(Request::Reload)
+    }
+
+    pub fn set_steam(&self, enabled: bool) -> Result<()> {
+        self.request_done(Request::Steam { enabled })
     }
 
     pub fn osk(&self) -> Result<OskStream> {

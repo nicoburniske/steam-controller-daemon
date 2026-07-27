@@ -5,8 +5,11 @@ use scd::protocol::{
     imu_mode_report, lizard_mode_report, parse_report, trackpad_click_pressure_report,
 };
 use std::ffi::CString;
+use std::fs;
+use std::path::Path;
 use std::time::{Duration, Instant};
 
+use crate::steam::SteamDevice;
 use scd::{Result, ResultExt};
 
 pub struct DeviceManager {
@@ -16,6 +19,7 @@ pub struct DeviceManager {
     trackpad_click_pressure: u16,
     last_state: Option<Instant>,
     last_scan: Instant,
+    steam: Option<SteamDevice>,
 }
 
 pub enum DeviceEvent {
@@ -33,6 +37,7 @@ struct Slot {
 impl DeviceManager {
     pub fn new(trackpad_click_pressure: u16) -> Result<Self> {
         let api = HidApi::new().whence()?;
+        let steam = SteamDevice::recover()?;
         let mut manager = Self {
             api,
             slots: Vec::new(),
@@ -40,12 +45,18 @@ impl DeviceManager {
             trackpad_click_pressure,
             last_state: None,
             last_scan: Instant::now() - Duration::from_secs(2),
+            steam,
         };
-        manager.scan()?;
+        if manager.steam.is_none() {
+            manager.scan()?;
+        }
         Ok(manager)
     }
 
     pub fn poll(&mut self) -> Result<Option<DeviceEvent>> {
+        if self.steam.is_some() {
+            return Ok(None);
+        }
         if self.active.is_none() && self.last_scan.elapsed() >= Duration::from_secs(1) {
             self.scan()?;
         }
@@ -78,23 +89,7 @@ impl DeviceManager {
                         Report::State(state) => {
                             if self.active.is_none() {
                                 self.active = Some(index);
-                                self.slots[index]
-                                    .device
-                                    .send_feature_report(&lizard_mode_report(false))
-                                    .whence()?;
-                                self.slots[index]
-                                    .device
-                                    .send_feature_report(&imu_mode_report(true))
-                                    .whence()?;
-                                for pad in [Trackpad::Left, Trackpad::Right] {
-                                    self.slots[index]
-                                        .device
-                                        .send_feature_report(&trackpad_click_pressure_report(
-                                            pad,
-                                            self.trackpad_click_pressure,
-                                        ))
-                                        .whence()?;
-                                }
+                                self.configure(index)?;
                                 log::info!(
                                     "controller connected on puck interface {}",
                                     self.slots[index].interface
@@ -130,12 +125,71 @@ impl DeviceManager {
     }
 
     pub fn connected(&self) -> bool {
-        self.active.is_some()
+        self.active.is_some() || self.steam.is_some()
+    }
+
+    pub fn steam_enabled(&self) -> bool {
+        self.steam.is_some()
+    }
+
+    pub fn set_steam(&mut self, enabled: bool) -> Result<()> {
+        if enabled == self.steam.is_some() {
+            return Ok(());
+        }
+        if enabled {
+            let active = self
+                .active
+                .ok_or_else(|| scd::Error::message("controller is not connected"))?;
+            let hidraw = Path::new(
+                self.slots[active]
+                    .path
+                    .to_str()
+                    .map_err(scd::Error::message)?,
+            )
+            .file_name()
+            .ok_or_else(|| scd::Error::message("controller has no hidraw device name"))?;
+            let sysfs =
+                fs::canonicalize(Path::new("/sys/class/hidraw").join(hidraw).join("device"))
+                    .whence()?;
+            let bus_id = sysfs
+                .ancestors()
+                .find(|path| {
+                    fs::read_to_string(path.join("idVendor")).is_ok_and(|value| value == "28de\n")
+                        && fs::read_to_string(path.join("idProduct"))
+                            .is_ok_and(|value| value == "1304\n")
+                })
+                .and_then(Path::file_name)
+                .and_then(|name| name.to_str())
+                .ok_or_else(|| scd::Error::message("could not find the controller USB device"))?
+                .to_owned();
+            self.active = None;
+            self.last_state = None;
+            self.slots.clear();
+            match SteamDevice::attach(bus_id) {
+                Ok(steam) => self.steam = Some(steam),
+                Err(error) => {
+                    self.last_scan = Instant::now() - Duration::from_secs(2);
+                    return Err(error);
+                }
+            }
+        } else {
+            let steam = self.steam.take().expect("Steam handoff exists");
+            if let Err(error) = steam.detach() {
+                self.steam = Some(steam);
+                return Err(error);
+            }
+            self.last_scan = Instant::now() - Duration::from_secs(2);
+        }
+        Ok(())
     }
 
     pub fn device_name(&self) -> Option<String> {
-        self.active
-            .map(|index| format!("28de:1304 interface {}", self.slots[index].interface))
+        if self.steam.is_some() {
+            Some("28de:1304".into())
+        } else {
+            self.active
+                .map(|index| format!("28de:1304 interface {}", self.slots[index].interface))
+        }
     }
 
     pub fn suppress_lizard_mode(&self) -> Result<()> {
@@ -301,6 +355,27 @@ impl DeviceManager {
         self.slots.sort_by_key(|slot| slot.interface);
         if self.slots.len() != previous_slot_count {
             log::info!("opened {} Steam Controller puck slots", self.slots.len());
+        }
+        Ok(())
+    }
+
+    fn configure(&self, index: usize) -> Result<()> {
+        self.slots[index]
+            .device
+            .send_feature_report(&lizard_mode_report(false))
+            .whence()?;
+        self.slots[index]
+            .device
+            .send_feature_report(&imu_mode_report(true))
+            .whence()?;
+        for pad in [Trackpad::Left, Trackpad::Right] {
+            self.slots[index]
+                .device
+                .send_feature_report(&trackpad_click_pressure_report(
+                    pad,
+                    self.trackpad_click_pressure,
+                ))
+                .whence()?;
         }
         Ok(())
     }
