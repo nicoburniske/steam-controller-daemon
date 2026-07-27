@@ -33,10 +33,7 @@ use smithay_client_toolkit::{
 };
 use std::{path::PathBuf, sync::mpsc, thread, time::Duration};
 
-const WIDTH: u32 = 1280;
-const HEIGHT: u32 = 360;
-
-pub fn run(socket: PathBuf, font: Box<[u8]>, theme: Theme) -> Result<()> {
+pub fn run(socket: PathBuf, font: Box<[u8]>, theme: Theme, width: u32, height: u32) -> Result<()> {
     let connection = Connection::connect_to_env().whence()?;
     let (globals, event_queue) = registry_queue_init(&connection).whence()?;
     let qh = event_queue.handle();
@@ -119,11 +116,11 @@ pub fn run(socket: PathBuf, font: Box<[u8]>, theme: Theme) -> Result<()> {
         layer,
         pool,
         buffer: None,
-        renderer: KeyboardRenderer::new(font, theme, WIDTH, HEIGHT, 1)?,
+        renderer: KeyboardRenderer::new(font, theme, width, height, 1)?,
         keyboard: Keyboard::default(),
         key_output,
-        width: WIDTH,
-        height: HEIGHT,
+        width,
+        height,
         scale: 1,
         configured: false,
         frame_pending: false,
@@ -202,7 +199,7 @@ impl State {
     fn show(&mut self) -> Result<()> {
         self.layer.set_layer(Layer::Overlay);
         self.layer.set_anchor(Anchor::BOTTOM);
-        self.layer.set_size(WIDTH, HEIGHT);
+        self.layer.set_size(self.width, self.height);
         self.layer.set_exclusive_zone(0);
         self.layer
             .set_keyboard_interactivity(KeyboardInteractivity::None);

@@ -3,10 +3,12 @@ use scd::{Result, ResultExt};
 use serde::{Deserialize, Deserializer};
 use std::{fs, path::Path, path::PathBuf};
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Theme {
     pub font: Option<PathBuf>,
+    pub width: u32,
+    pub height: u32,
     pub colors: ThemeColors,
 }
 
@@ -34,6 +36,17 @@ pub struct ThemeColor([u8; 4]);
 impl Theme {
     pub fn load(path: &Path) -> Result<Self> {
         toml::from_str(&fs::read_to_string(path).whence()?).whence()
+    }
+}
+
+impl Default for Theme {
+    fn default() -> Self {
+        Self {
+            font: None,
+            width: 1280,
+            height: 360,
+            colors: ThemeColors::default(),
+        }
     }
 }
 

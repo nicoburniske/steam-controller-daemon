@@ -26,10 +26,10 @@ struct Args {
     theme: Option<PathBuf>,
     #[arg(long)]
     preview: Option<PathBuf>,
-    #[arg(long, default_value_t = 1920)]
-    width: u32,
-    #[arg(long, default_value_t = 360)]
-    height: u32,
+    #[arg(long)]
+    width: Option<u32>,
+    #[arg(long)]
+    height: Option<u32>,
 }
 
 fn main() -> Result<()> {
@@ -53,6 +53,8 @@ fn main() -> Result<()> {
         .or_else(|| option_env!("SCD_OSK_FONT").map(Path::new))
         .ok_or_else(|| Error::message("pass --font or build with SCD_OSK_FONT"))?;
     let font = fs::read(font_path).whence()?.into_boxed_slice();
+    let width = args.width.unwrap_or(theme.width);
+    let height = args.height.unwrap_or(theme.height);
 
     if let Some(preview) = args.preview {
         let mut keyboard = Keyboard::default();
@@ -81,10 +83,10 @@ fn main() -> Result<()> {
             position: [0.25, 0.15],
         };
         keyboard.update(state, &keys);
-        let mut renderer = KeyboardRenderer::new(font, theme, args.width, args.height, 1)?;
+        let mut renderer = KeyboardRenderer::new(font, theme, width, height, 1)?;
         renderer.render(&keyboard);
         let mut output = BufWriter::new(fs::File::create(preview).whence()?);
-        write!(output, "P6\n{} {}\n255\n", args.width, args.height).whence()?;
+        write!(output, "P6\n{width} {height}\n255\n").whence()?;
         for pixel in renderer.pixels() {
             output
                 .write_all(&[
@@ -98,5 +100,5 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    wayland::run(args.socket, font, theme)
+    wayland::run(args.socket, font, theme, width, height)
 }
