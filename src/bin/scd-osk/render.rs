@@ -101,6 +101,7 @@ impl KeyboardRenderer {
                 .background(colors.background.color())
                 .border(BORDER_WIDTH, colors.border.color())
                 .uniform_radius(KEY_RADIUS)
+                .replace(true)
                 .render(ui);
 
             let bindings = keyboard.bindings();
@@ -464,20 +465,6 @@ fn render_hint(
 
 impl PlatformImpl for BlitPlatform {
     fn render(&mut self, paint: &PaintList, damage: &[PhysicalRect]) {
-        let screen = self.renderer.screen();
-        let width = screen.width as usize;
-        let pixels = self.renderer.buffer_mut().pixels_mut();
-        for damage in damage {
-            let Some(damage) = damage.intersection(screen) else {
-                continue;
-            };
-            let left = (damage.x - screen.x) as usize;
-            let top = (damage.y - screen.y) as usize;
-            for row in top..top + damage.height as usize {
-                let start = row * width + left;
-                pixels[start..start + damage.width as usize].fill(Argb8888::from_raw(0));
-            }
-        }
         self.renderer.render(paint, damage);
     }
 
