@@ -5,8 +5,7 @@ use scd::{
     Error, Result,
     config::{
         Action, AxisActivation, AxisComponent, AxisMapping, AxisOptions, Binding, Config, Gamepad,
-        GamepadButton, GlobalAction, ModeId, MouseButton, Trigger, VectorAxisMapping, VectorSource,
-        VectorTarget,
+        GamepadButton, GlobalAction, ModeId, MouseButton, Stick, Trigger, VectorTarget,
     },
     protocol::{Button, Buttons, ControllerState, Haptic, StateFormat, TouchpadState, Trackpad},
 };
@@ -285,9 +284,14 @@ impl Mapper {
             let was_active = self.axis_active[index];
             let mapping = &self.config.mode(self.active_mode).axes[index];
             let options = match mapping {
-                AxisMapping::Scalar(mapping) => mapping.options,
-                AxisMapping::Vector(mapping) => mapping.options,
+                AxisMapping::Trigger { options, .. } => *options,
+                AxisMapping::Stick { options, .. }
+                | AxisMapping::PadPosition { options, .. }
+                | AxisMapping::PadMotion { options, .. }
+                | AxisMapping::CircularScroll { options, .. }
+                | AxisMapping::Gyro { options, .. } => options.axis,
             };
+            // activation
             let active = options
                 .activation
                 .is_none_or(|activation| match activation {
@@ -310,109 +314,176 @@ impl Mapper {
                 continue;
             }
 
-            match mapping {
-                AxisMapping::Scalar(mapping) => {
-                    let value = scale_axis(trigger_value(mapping.source, state), options);
-                    gamepad[match mapping.target {
+            // source
+            let (value, source_scale, acceleration, target, vector_options) = match mapping {
+                AxisMapping::Trigger {
+                    source,
+                    target,
+                    options,
+                } => {
+                    let value = scale_axis(trigger_value(*source, state), *options);
+                    gamepad[match target {
                         Trigger::Left => GamepadAxis::LeftTrigger,
                         Trigger::Right => GamepadAxis::RightTrigger,
                     } as usize] = value;
+                    continue;
                 }
-                AxisMapping::Vector(mapping) => {
-                    if mapping.target == VectorTarget::Scroll {
-                        if let Some(pad) = touchpad(mapping.source, state) {
-                            let previous_pad = previous
-                                .as_ref()
-                                .and_then(|state| touchpad(mapping.source, state));
-                            let value = previous_pad
-                                .filter(|previous_pad| {
-                                    pad.touched
-                                        && previous_pad.touched
-                                        && pad.position[0].hypot(pad.position[1])
-                                            >= TRACKPAD_SCROLL_MIN_RADIUS
-                                        && previous_pad.position[0].hypot(previous_pad.position[1])
-                                            >= TRACKPAD_SCROLL_MIN_RADIUS
-                                })
-                                .map_or([0.0, 0.0], |previous_pad| {
-                                    let cross = previous_pad.position[0] * pad.position[1]
-                                        - previous_pad.position[1] * pad.position[0];
-                                    let dot = previous_pad.position[0] * pad.position[0]
-                                        + previous_pad.position[1] * pad.position[1];
-                                    [0.0, cross.atan2(dot) * options.sensitivity]
-                                });
-                            emit_vector(
-                                mapping.target,
-                                orient_vector(value, mapping),
-                                &mut gamepad,
-                                outputs,
-                            );
-                            continue;
-                        }
-                    }
-
-                    let relative = matches!(
-                        mapping.target,
-                        VectorTarget::MouseMotion | VectorTarget::Scroll
-                    );
-                    let gyro_seconds =
-                        if matches!(mapping.source, VectorSource::Gyro(_)) && relative {
+                AxisMapping::Stick {
+                    source,
+                    target,
+                    options,
+                } => (
+                    match source {
+                        Stick::Left => state.left_stick,
+                        Stick::Right => state.right_stick,
+                    },
+                    1.0,
+                    0.0,
+                    *target,
+                    *options,
+                ),
+                AxisMapping::PadPosition {
+                    pad,
+                    target,
+                    options,
+                } => {
+                    let pad = touchpad(*pad, state);
+                    (
+                        if pad.touched {
+                            pad.position
+                        } else {
+                            [0.0, 0.0]
+                        },
+                        1.0,
+                        0.0,
+                        match target {
+                            Stick::Left => VectorTarget::GamepadLeftStick,
+                            Stick::Right => VectorTarget::GamepadRightStick,
+                        },
+                        *options,
+                    )
+                }
+                AxisMapping::PadMotion {
+                    pad,
+                    options,
+                    acceleration,
+                } => {
+                    let trackpad = *pad;
+                    let pad = touchpad(trackpad, state);
+                    let value = if !pad.touched {
+                        [0.0, 0.0]
+                    } else {
+                        previous
+                            .as_ref()
+                            .map(|state| touchpad(trackpad, state))
+                            .filter(|pad| pad.touched)
+                            .map_or([0.0, 0.0], |previous_pad| {
+                                [
+                                    pad.position[0] - previous_pad.position[0],
+                                    pad.position[1] - previous_pad.position[1],
+                                ]
+                            })
+                    };
+                    (
+                        value,
+                        1.0,
+                        *acceleration,
+                        VectorTarget::MouseMotion,
+                        *options,
+                    )
+                }
+                AxisMapping::CircularScroll { pad, options } => {
+                    let trackpad = *pad;
+                    let pad = touchpad(trackpad, state);
+                    let value = previous
+                        .as_ref()
+                        .map(|state| touchpad(trackpad, state))
+                        .filter(|previous_pad| {
+                            pad.touched
+                                && previous_pad.touched
+                                && pad.position[0].hypot(pad.position[1])
+                                    >= TRACKPAD_SCROLL_MIN_RADIUS
+                                && previous_pad.position[0].hypot(previous_pad.position[1])
+                                    >= TRACKPAD_SCROLL_MIN_RADIUS
+                        })
+                        .map_or([0.0, 0.0], |previous_pad| {
+                            let cross = previous_pad.position[0] * pad.position[1]
+                                - previous_pad.position[1] * pad.position[0];
+                            let dot = previous_pad.position[0] * pad.position[0]
+                                + previous_pad.position[1] * pad.position[1];
+                            [0.0, cross.atan2(dot)]
+                        });
+                    (value, 1.0, 0.0, VectorTarget::Scroll, *options)
+                }
+                AxisMapping::Gyro {
+                    components,
+                    target,
+                    options,
+                } => {
+                    let value = components.map(|component| match component {
+                        AxisComponent::X => state.gyro[0],
+                        AxisComponent::Y => state.gyro[1],
+                        AxisComponent::Z => state.gyro[2],
+                    });
+                    let source_scale =
+                        if matches!(target, VectorTarget::MouseMotion | VectorTarget::Scroll) {
                             frame_seconds(state, previous.as_ref(), false).unwrap_or(0.0)
                         } else {
                             1.0
                         };
-                    let value = match mapping.source {
-                        VectorSource::LeftStick => state.left_stick,
-                        VectorSource::RightStick => state.right_stick,
-                        source @ (VectorSource::LeftPad | VectorSource::RightPad) => {
-                            let pad = touchpad(source, state).expect("source is a touchpad");
-                            if !pad.touched {
-                                [0.0, 0.0]
-                            } else if relative {
-                                previous
-                                    .as_ref()
-                                    .and_then(|state| touchpad(source, state))
-                                    .filter(|pad| pad.touched)
-                                    .map_or([0.0, 0.0], |previous_pad| {
-                                        [
-                                            pad.position[0] - previous_pad.position[0],
-                                            pad.position[1] - previous_pad.position[1],
-                                        ]
-                                    })
-                            } else {
-                                pad.position
-                            }
-                        }
-                        VectorSource::Gyro(components) => {
-                            components.map(|component| match component {
-                                AxisComponent::X => state.gyro[0],
-                                AxisComponent::Y => state.gyro[1],
-                                AxisComponent::Z => state.gyro[2],
-                            })
-                        }
-                    };
-                    let value = orient_vector(value, mapping);
-
-                    let magnitude = value[0].hypot(value[1]);
-                    let value = if magnitude <= options.deadzone {
-                        [0.0, 0.0]
-                    } else {
-                        let acceleration_gain = if mapping.acceleration > 0.0 {
-                            frame_seconds(state, previous.as_ref(), true).map_or(1.0, |seconds| {
-                                let speed = magnitude / seconds;
-                                1.0 + mapping.acceleration * (1.0 - (-(speed / 4.0).powi(2)).exp())
-                            })
-                        } else {
-                            1.0
-                        };
-                        let scaled_magnitude =
-                            scale_axis(magnitude, options) * acceleration_gain * gyro_seconds;
-                        [
-                            value[0] / magnitude * scaled_magnitude,
-                            value[1] / magnitude * scaled_magnitude,
-                        ]
-                    };
-                    emit_vector(mapping.target, value, &mut gamepad, outputs);
+                    (value, source_scale, 0.0, *target, *options)
                 }
+            };
+
+            // transform
+            let mut value = value;
+            if vector_options.swap_xy {
+                value.swap(0, 1);
+            }
+            if vector_options.invert_x {
+                value[0] = -value[0];
+            }
+            if vector_options.invert_y {
+                value[1] = -value[1];
+            }
+            let magnitude = value[0].hypot(value[1]);
+            let value = if magnitude <= options.deadzone {
+                [0.0, 0.0]
+            } else {
+                let acceleration_gain = if acceleration > 0.0 {
+                    frame_seconds(state, previous.as_ref(), true).map_or(1.0, |seconds| {
+                        let speed = magnitude / seconds;
+                        1.0 + acceleration * (1.0 - (-(speed / 4.0).powi(2)).exp())
+                    })
+                } else {
+                    1.0
+                };
+                let scaled_magnitude =
+                    scale_axis(magnitude, options) * acceleration_gain * source_scale;
+                [
+                    value[0] / magnitude * scaled_magnitude,
+                    value[1] / magnitude * scaled_magnitude,
+                ]
+            };
+
+            // target
+            let [x, y] = value;
+            match target {
+                VectorTarget::GamepadLeftStick => {
+                    gamepad[GamepadAxis::LeftX as usize] += x;
+                    gamepad[GamepadAxis::LeftY as usize] += y;
+                }
+                VectorTarget::GamepadRightStick => {
+                    gamepad[GamepadAxis::RightX as usize] += x;
+                    gamepad[GamepadAxis::RightY as usize] += y;
+                }
+                VectorTarget::MouseMotion if x != 0.0 || y != 0.0 => {
+                    outputs.push(Output::MouseMotion { x, y });
+                }
+                VectorTarget::Scroll if x != 0.0 || y != 0.0 => {
+                    outputs.push(Output::Scroll { x, y });
+                }
+                VectorTarget::MouseMotion | VectorTarget::Scroll => {}
             }
         }
         for axis in GAMEPAD_AXES {
@@ -656,25 +727,11 @@ fn scale_axis(value: f32, options: AxisOptions) -> f32 {
     }
 }
 
-fn touchpad(source: VectorSource, state: &ControllerState) -> Option<TouchpadState> {
-    match source {
-        VectorSource::LeftPad => Some(state.left_pad),
-        VectorSource::RightPad => Some(state.right_pad),
-        _ => None,
+fn touchpad(trackpad: Trackpad, state: &ControllerState) -> TouchpadState {
+    match trackpad {
+        Trackpad::Left => state.left_pad,
+        Trackpad::Right => state.right_pad,
     }
-}
-
-fn orient_vector(mut value: [f32; 2], mapping: &VectorAxisMapping) -> [f32; 2] {
-    if mapping.swap_xy {
-        value.swap(0, 1);
-    }
-    if mapping.invert_x {
-        value[0] = -value[0];
-    }
-    if mapping.invert_y {
-        value[1] = -value[1];
-    }
-    value
 }
 
 fn frame_seconds(
@@ -698,31 +755,6 @@ fn frame_seconds(
     (1..=100_000)
         .contains(&delta_us)
         .then_some(delta_us as f32 / 1_000_000.0)
-}
-
-fn emit_vector(
-    target: VectorTarget,
-    [x, y]: [f32; 2],
-    gamepad: &mut [f32; 6],
-    outputs: &mut Vec<Output>,
-) {
-    match target {
-        VectorTarget::GamepadLeftStick => {
-            gamepad[GamepadAxis::LeftX as usize] += x;
-            gamepad[GamepadAxis::LeftY as usize] += y;
-        }
-        VectorTarget::GamepadRightStick => {
-            gamepad[GamepadAxis::RightX as usize] += x;
-            gamepad[GamepadAxis::RightY as usize] += y;
-        }
-        VectorTarget::MouseMotion if x != 0.0 || y != 0.0 => {
-            outputs.push(Output::MouseMotion { x, y });
-        }
-        VectorTarget::Scroll if x != 0.0 || y != 0.0 => {
-            outputs.push(Output::Scroll { x, y });
-        }
-        VectorTarget::MouseMotion | VectorTarget::Scroll => {}
-    }
 }
 
 #[derive(Clone, Copy, Default)]

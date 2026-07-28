@@ -6,7 +6,7 @@ use evdev::KeyCode;
 use indexmap::IndexMap;
 use serde::{Deserialize, Deserializer};
 
-use crate::protocol::{Button, Buttons, Haptic};
+use crate::protocol::{Button, Buttons, Haptic, Trackpad};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Config {
@@ -359,36 +359,26 @@ impl TryFrom<raw::Config> for Config {
                         },
                     };
                     if scalar_source {
-                        let source = match mapping.source {
-                            raw::AnalogSource::LeftTrigger => Trigger::Left,
-                            raw::AnalogSource::RightTrigger => Trigger::Right,
-                            _ => return None,
-                        };
-                        let target = match mapping.target {
-                            raw::AnalogTarget::GamepadLeftTrigger => Trigger::Left,
-                            raw::AnalogTarget::GamepadRightTrigger => Trigger::Right,
-                            _ => return None,
-                        };
-                        return Some(AxisMapping::Scalar(ScalarAxisMapping {
-                            source,
-                            target,
+                        return Some(AxisMapping::Trigger {
+                            source: match mapping.source {
+                                raw::AnalogSource::LeftTrigger => Trigger::Left,
+                                raw::AnalogSource::RightTrigger => Trigger::Right,
+                                _ => return None,
+                            },
+                            target: match mapping.target {
+                                raw::AnalogTarget::GamepadLeftTrigger => Trigger::Left,
+                                raw::AnalogTarget::GamepadRightTrigger => Trigger::Right,
+                                _ => return None,
+                            },
                             options,
-                        }));
+                        });
                     }
 
-                    let source = match mapping.source {
-                        raw::AnalogSource::LeftStick => VectorSource::LeftStick,
-                        raw::AnalogSource::RightStick => VectorSource::RightStick,
-                        raw::AnalogSource::LeftPad => VectorSource::LeftPad,
-                        raw::AnalogSource::RightPad => VectorSource::RightPad,
-                        raw::AnalogSource::Gyro => VectorSource::Gyro(
-                            mapping
-                                .components
-                                .unwrap_or([AxisComponent::Y, AxisComponent::X]),
-                        ),
-                        raw::AnalogSource::LeftTrigger | raw::AnalogSource::RightTrigger => {
-                            return None;
-                        }
+                    let vector_options = VectorOptions {
+                        axis: options,
+                        invert_x: mapping.invert_x,
+                        invert_y: mapping.invert_y,
+                        swap_xy: mapping.swap_xy,
                     };
                     let target = match mapping.target {
                         raw::AnalogTarget::GamepadLeftStick => VectorTarget::GamepadLeftStick,
@@ -398,15 +388,60 @@ impl TryFrom<raw::Config> for Config {
                         raw::AnalogTarget::GamepadLeftTrigger
                         | raw::AnalogTarget::GamepadRightTrigger => return None,
                     };
-                    Some(AxisMapping::Vector(VectorAxisMapping {
-                        source,
-                        target,
-                        options,
-                        acceleration: mapping.acceleration.unwrap_or(0.0),
-                        invert_x: mapping.invert_x,
-                        invert_y: mapping.invert_y,
-                        swap_xy: mapping.swap_xy,
-                    }))
+                    match mapping.source {
+                        source @ (raw::AnalogSource::LeftStick | raw::AnalogSource::RightStick) => {
+                            Some(AxisMapping::Stick {
+                                source: if source == raw::AnalogSource::LeftStick {
+                                    Stick::Left
+                                } else {
+                                    Stick::Right
+                                },
+                                target,
+                                options: vector_options,
+                            })
+                        }
+                        source @ (raw::AnalogSource::LeftPad | raw::AnalogSource::RightPad) => {
+                            let pad = if source == raw::AnalogSource::LeftPad {
+                                Trackpad::Left
+                            } else {
+                                Trackpad::Right
+                            };
+                            match target {
+                                VectorTarget::GamepadLeftStick
+                                | VectorTarget::GamepadRightStick => {
+                                    Some(AxisMapping::PadPosition {
+                                        pad,
+                                        target: if target == VectorTarget::GamepadLeftStick {
+                                            Stick::Left
+                                        } else {
+                                            Stick::Right
+                                        },
+                                        options: vector_options,
+                                    })
+                                }
+                                VectorTarget::MouseMotion => Some(AxisMapping::PadMotion {
+                                    pad,
+                                    options: vector_options,
+                                    acceleration: mapping.acceleration.unwrap_or(0.0),
+                                }),
+                                VectorTarget::Scroll => Some(AxisMapping::CircularScroll {
+                                    pad,
+                                    options: vector_options,
+                                }),
+                            }
+                        }
+                        raw::AnalogSource::Gyro => {
+                            let components = mapping
+                                .components
+                                .unwrap_or([AxisComponent::Y, AxisComponent::X]);
+                            Some(AxisMapping::Gyro {
+                                components,
+                                target,
+                                options: vector_options,
+                            })
+                        }
+                        _ => None,
+                    }
                 })
                 .collect();
             modes.push(Mode {
@@ -501,28 +536,37 @@ pub enum Gamepad {
     Xbox,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum AxisMapping {
-    Scalar(ScalarAxisMapping),
-    Vector(VectorAxisMapping),
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct ScalarAxisMapping {
-    pub source: Trigger,
-    pub target: Trigger,
-    pub options: AxisOptions,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct VectorAxisMapping {
-    pub source: VectorSource,
-    pub target: VectorTarget,
-    pub options: AxisOptions,
-    pub acceleration: f32,
-    pub invert_x: bool,
-    pub invert_y: bool,
-    pub swap_xy: bool,
+    Trigger {
+        source: Trigger,
+        target: Trigger,
+        options: AxisOptions,
+    },
+    Stick {
+        source: Stick,
+        target: VectorTarget,
+        options: VectorOptions,
+    },
+    PadPosition {
+        pad: Trackpad,
+        target: Stick,
+        options: VectorOptions,
+    },
+    PadMotion {
+        pad: Trackpad,
+        options: VectorOptions,
+        acceleration: f32,
+    },
+    CircularScroll {
+        pad: Trackpad,
+        options: VectorOptions,
+    },
+    Gyro {
+        components: [AxisComponent; 2],
+        target: VectorTarget,
+        options: VectorOptions,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -531,6 +575,14 @@ pub struct AxisOptions {
     pub deadzone: f32,
     pub sensitivity: f32,
     pub exponent: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct VectorOptions {
+    pub axis: AxisOptions,
+    pub invert_x: bool,
+    pub invert_y: bool,
+    pub swap_xy: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -550,12 +602,9 @@ pub enum Trigger {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum VectorSource {
-    LeftStick,
-    RightStick,
-    LeftPad,
-    RightPad,
-    Gyro([AxisComponent; 2]),
+pub enum Stick {
+    Left,
+    Right,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -768,15 +817,71 @@ mod tests {
             mode.layers[0].bindings[0].action,
             Action::Key(KeyCode::KEY_Q)
         );
-        let AxisMapping::Vector(axis) = &mode.axes[0] else {
-            panic!("expected vector axis");
+        let AxisMapping::Gyro {
+            components,
+            options,
+            ..
+        } = mode.axes[0]
+        else {
+            panic!("expected gyro motion axis");
         };
-        assert_eq!(
-            axis.source,
-            VectorSource::Gyro([AxisComponent::Y, AxisComponent::X])
-        );
-        assert_eq!(axis.options.exponent, 2.0);
+        assert_eq!(components, [AxisComponent::Y, AxisComponent::X]);
+        assert_eq!(options.axis.exponent, 2.0);
         assert_eq!(config.mode(other).gamepad, Gamepad::Xbox);
+    }
+
+    #[test]
+    fn parses_axis_operations() {
+        let config = Config::parse(
+            r#"
+                version = 1
+                default_mode = "one"
+                [mode.one]
+                [[mode.one.axis]]
+                source = "left-pad"
+                target = "gamepad-left-stick"
+                [[mode.one.axis]]
+                source = "right-pad"
+                target = "mouse-motion"
+                [[mode.one.axis]]
+                source = "left-pad"
+                target = "scroll"
+                [[mode.one.axis]]
+                source = "gyro"
+                target = "gamepad-right-stick"
+                [[mode.one.axis]]
+                source = "gyro"
+                target = "mouse-motion"
+            "#,
+        )
+        .unwrap();
+        assert!(matches!(
+            config.modes[0].axes.as_slice(),
+            [
+                AxisMapping::PadPosition {
+                    pad: Trackpad::Left,
+                    ..
+                },
+                AxisMapping::PadMotion {
+                    pad: Trackpad::Right,
+                    ..
+                },
+                AxisMapping::CircularScroll {
+                    pad: Trackpad::Left,
+                    ..
+                },
+                AxisMapping::Gyro {
+                    components: [AxisComponent::Y, AxisComponent::X],
+                    target: VectorTarget::GamepadRightStick,
+                    ..
+                },
+                AxisMapping::Gyro {
+                    components: [AxisComponent::Y, AxisComponent::X],
+                    target: VectorTarget::MouseMotion,
+                    ..
+                },
+            ]
+        ));
     }
 
     #[test]
