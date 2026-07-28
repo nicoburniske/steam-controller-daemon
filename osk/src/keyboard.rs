@@ -141,7 +141,7 @@ const SHIFT: Key = Key {
     action: Action::Shift,
     weight: 20,
 };
-const CAPS: Key = key!("Caps", KEY_CAPSLOCK, 16);
+const ESCAPE: Key = key!("Esc", KEY_ESC, 16);
 const SYMBOLS: Key = Key {
     label: "?123",
     shifted_label: None,
@@ -199,7 +199,7 @@ const LETTERS_PAGE: [&[Key]; 5] = [
         character!("\\", "|", KEY_BACKSLASH),
     ],
     &[
-        CAPS,
+        ESCAPE,
         character!("a", "A", KEY_A),
         character!("s", "S", KEY_S),
         character!("d", "D", KEY_D),
