@@ -1,6 +1,7 @@
 use clap::{Parser, Subcommand};
 use scd::protocol::Haptic;
 use scd::{Client, Config};
+use std::fs;
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -172,7 +173,7 @@ fn main() -> scd::Result<()> {
         } => client.set_steam(false)?,
         Command::Reload => client.reload()?,
         Command::Validate { path } => {
-            Config::load(path)?;
+            Config::parse(&fs::read_to_string(path)?)?;
             println!("configuration is valid");
         }
     }

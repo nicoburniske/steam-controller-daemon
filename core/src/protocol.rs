@@ -188,6 +188,10 @@ impl Buttons {
         self.0 & button.mask() != 0
     }
 
+    pub const fn contains_all(self, buttons: Self) -> bool {
+        self.0 & buttons.0 == buttons.0
+    }
+
     pub fn insert(&mut self, button: Button) {
         self.0 |= button.mask();
     }

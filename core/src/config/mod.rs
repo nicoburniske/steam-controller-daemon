@@ -1,0 +1,950 @@
+mod raw;
+
+use std::{error, fmt, str::FromStr};
+
+use evdev::KeyCode;
+use indexmap::IndexMap;
+use serde::{Deserialize, Deserializer};
+
+use crate::protocol::{Button, Buttons, Haptic};
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Config {
+    pub default_mode: ModeId,
+    pub mode_switch_haptic: Option<Haptic>,
+    pub click_pressure: u16,
+    pub osk_bindings: IndexMap<Button, KeyCode>,
+    pub global_bindings: Vec<GlobalBinding>,
+    mode_names: IndexMap<String, ModeId>,
+    pub modes: Vec<Mode>,
+}
+
+impl Config {
+    pub fn parse(source: &str) -> Result<Self, ConfigError> {
+        let raw: raw::Config =
+            toml::from_str(source).map_err(|error| ConfigError(vec![error.to_string()]))?;
+        Self::try_from(raw)
+    }
+
+    pub fn mode_id(&self, name: &str) -> Option<ModeId> {
+        self.mode_names.get(name).copied()
+    }
+
+    pub fn mode_name(&self, mode: ModeId) -> &str {
+        self.mode_names
+            .get_index(mode.0)
+            .expect("ModeId belongs to this Config")
+            .0
+    }
+
+    pub fn mode(&self, mode: ModeId) -> &Mode {
+        &self.modes[mode.0]
+    }
+
+    pub fn next_mode(&self, mode: ModeId) -> ModeId {
+        ModeId((mode.0 + 1) % self.modes.len())
+    }
+}
+
+impl TryFrom<raw::Config> for Config {
+    type Error = ConfigError;
+
+    fn try_from(config: raw::Config) -> Result<Self, Self::Error> {
+        let raw::Config {
+            version,
+            default_mode,
+            mode_switch_haptic,
+            trackpad,
+            osk,
+            global,
+            mode: raw_modes,
+        } = config;
+        let mut errors = Vec::new();
+
+        if version != 1 {
+            errors.push(format!("version must be 1, got {version}"));
+        }
+        if raw_modes.is_empty() {
+            errors.push("at least one mode is required".into());
+        }
+        if default_mode.trim().is_empty() {
+            errors.push("default_mode must not be empty".into());
+        }
+        if trackpad.click_pressure > 100 {
+            errors.push("trackpad.click_pressure must be in [0, 100]".into());
+        }
+
+        let mut mode_names = IndexMap::with_capacity(raw_modes.len());
+        for (index, name) in raw_modes.keys().enumerate() {
+            if name.trim().is_empty() {
+                errors.push("mode names must not be empty".into());
+            }
+            mode_names.insert(name.clone(), ModeId(index));
+        }
+        let resolved_default_mode = mode_names.get(&default_mode).copied();
+        if resolved_default_mode.is_none() {
+            errors.push(format!(
+                "default_mode {default_mode:?} does not name a configured mode"
+            ));
+        }
+
+        for input in osk.bind.keys() {
+            if matches!(
+                input,
+                Button::LeftPadTouch
+                    | Button::LeftPadClick
+                    | Button::RightPadTouch
+                    | Button::RightPadClick
+            ) {
+                errors.push(format!(
+                    "OSK binding input {input:?} is reserved for keyboard pointing"
+                ));
+            }
+        }
+
+        for (index, binding) in global.bind.iter().enumerate() {
+            if binding.chord.is_empty() {
+                errors.push(format!("global binding {index} chord must not be empty"));
+            }
+            for (position, button) in binding.chord.iter().enumerate() {
+                if binding.chord[..position].contains(button) {
+                    errors.push(format!(
+                        "global binding {index} chord contains duplicate button {button:?}"
+                    ));
+                }
+            }
+            if global.bind[..index]
+                .iter()
+                .any(|earlier| earlier.chord == binding.chord)
+            {
+                errors.push(format!(
+                    "global binding {index} duplicates an earlier chord"
+                ));
+            }
+        }
+
+        let osk_bindings = osk
+            .bind
+            .into_iter()
+            .map(|(button, key)| (button, key.0))
+            .collect();
+        let global_bindings = global
+            .bind
+            .into_iter()
+            .filter_map(|binding| {
+                let action = convert_global_action(binding.action, &mode_names, &mut errors)?;
+                let mut chord = binding.chord;
+                let trigger = chord.pop()?;
+                Some(GlobalBinding {
+                    prerequisites: chord.into_boxed_slice(),
+                    trigger,
+                    action,
+                })
+            })
+            .collect();
+
+        let mut modes = Vec::with_capacity(raw_modes.len());
+        for (name, mode) in raw_modes {
+            let mut mode_inputs = Buttons::default();
+            for (index, binding) in mode.bind.iter().enumerate() {
+                if mode_inputs.contains(binding.input) {
+                    errors.push(format!(
+                        "mode {name:?} binding {index} duplicates input {:?}",
+                        binding.input
+                    ));
+                }
+                mode_inputs.insert(binding.input);
+            }
+
+            let mut layer_holds = Buttons::default();
+            for (layer_name, layer) in &mode.layer {
+                if layer_name.trim().is_empty() {
+                    errors.push(format!("mode {name:?} layer names must not be empty"));
+                }
+                if layer_holds.contains(layer.hold) {
+                    errors.push(format!(
+                        "mode {name:?} layer {layer_name:?} hold conflicts with an earlier layer"
+                    ));
+                }
+                layer_holds.insert(layer.hold);
+                if mode_inputs.contains(layer.hold) {
+                    errors.push(format!(
+                        "mode {name:?} layer {layer_name:?} hold must not also be a mode binding"
+                    ));
+                }
+
+                let mut layer_inputs = Buttons::default();
+                for (binding_index, binding) in layer.bind.iter().enumerate() {
+                    if binding.input == layer.hold {
+                        errors.push(format!(
+                            "mode {name:?} layer {layer_name:?} binding {binding_index} must not use its hold button"
+                        ));
+                    }
+                    if layer_inputs.contains(binding.input) {
+                        errors.push(format!(
+                            "mode {name:?} layer {layer_name:?} binding {binding_index} duplicates input {:?}",
+                            binding.input
+                        ));
+                    }
+                    layer_inputs.insert(binding.input);
+                }
+            }
+
+            for (index, mapping) in mode.axis.iter().enumerate() {
+                if mode.axis[..index]
+                    .iter()
+                    .any(|earlier| earlier.target == mapping.target)
+                    && !matches!(
+                        mapping.target,
+                        raw::AnalogTarget::GamepadLeftStick
+                            | raw::AnalogTarget::GamepadRightStick
+                            | raw::AnalogTarget::MouseMotion
+                    )
+                {
+                    errors.push(format!(
+                        "mode {name:?} axis mapping {index} duplicates target {:?}",
+                        mapping.target
+                    ));
+                }
+            }
+
+            let bindings = mode
+                .bind
+                .into_iter()
+                .filter_map(|binding| {
+                    convert_action(binding.action, &mode_names, &mut errors).map(|action| Binding {
+                        input: binding.input,
+                        action,
+                    })
+                })
+                .collect();
+            let layers = mode
+                .layer
+                .into_values()
+                .map(|layer| Layer {
+                    hold: layer.hold,
+                    bindings: layer
+                        .bind
+                        .into_iter()
+                        .filter_map(|binding| {
+                            convert_action(binding.action, &mode_names, &mut errors).map(|action| {
+                                Binding {
+                                    input: binding.input,
+                                    action,
+                                }
+                            })
+                        })
+                        .collect(),
+                })
+                .collect();
+            let axes = mode
+                .axis
+                .into_iter()
+                .enumerate()
+                .filter_map(|(index, mapping)| {
+                    let error_count = errors.len();
+                    let scalar_source = matches!(
+                        mapping.source,
+                        raw::AnalogSource::LeftTrigger | raw::AnalogSource::RightTrigger
+                    );
+                    let scalar_target = matches!(
+                        mapping.target,
+                        raw::AnalogTarget::GamepadLeftTrigger
+                            | raw::AnalogTarget::GamepadRightTrigger
+                    );
+                    if scalar_source != scalar_target {
+                        errors.push(format!(
+                            "mode {name:?} axis mapping {index} must connect a scalar source to a trigger or a vector source to a stick, mouse, or scroll target"
+                        ));
+                    }
+                    if mapping.components.is_some()
+                        && mapping.source != raw::AnalogSource::Gyro
+                    {
+                        errors.push(format!(
+                            "mode {name:?} axis mapping {index} components is only valid for a gyro source"
+                        ));
+                    }
+
+                    let activation = match mapping.activation {
+                        Some(raw::AxisActivation::Trigger(activation)) => {
+                            let source = match activation.source {
+                                raw::AnalogSource::LeftTrigger => Some(Trigger::Left),
+                                raw::AnalogSource::RightTrigger => Some(Trigger::Right),
+                                _ => {
+                                    errors.push(format!(
+                                        "mode {name:?} axis mapping {index} activation source must be a trigger"
+                                    ));
+                                    None
+                                }
+                            };
+                            if !activation.engage.is_finite()
+                                || !activation.release.is_finite()
+                                || activation.release < 0.0
+                                || activation.release >= activation.engage
+                                || activation.engage > 1.0
+                            {
+                                errors.push(format!(
+                                    "mode {name:?} axis mapping {index} activation thresholds must satisfy 0 <= release < engage <= 1"
+                                ));
+                            }
+                            source.map(|source| AxisActivation::Trigger {
+                                source,
+                                engage: activation.engage,
+                                release: activation.release,
+                            })
+                        }
+                        Some(raw::AxisActivation::All { all }) => {
+                            if all.is_empty() {
+                                errors.push(format!(
+                                    "mode {name:?} axis mapping {index} activation must contain at least one button"
+                                ));
+                            }
+                            let mut buttons = Buttons::default();
+                            for button in all {
+                                buttons.insert(button);
+                            }
+                            Some(AxisActivation::Buttons(buttons))
+                        }
+                        None => None,
+                    };
+
+                    if let Some(deadzone) = mapping.deadzone
+                        && (!deadzone.is_finite() || !(0.0..1.0).contains(&deadzone))
+                    {
+                        errors.push(format!(
+                            "mode {name:?} axis mapping {index} deadzone must be finite and in [0, 1)"
+                        ));
+                    }
+                    if let Some(sensitivity) = mapping.sensitivity
+                        && (!sensitivity.is_finite() || sensitivity < 0.0)
+                    {
+                        errors.push(format!(
+                            "mode {name:?} axis mapping {index} sensitivity must be finite and non-negative"
+                        ));
+                    }
+                    if let Some(acceleration) = mapping.acceleration {
+                        if !acceleration.is_finite() || acceleration < 0.0 {
+                            errors.push(format!(
+                                "mode {name:?} axis mapping {index} acceleration must be finite and non-negative"
+                            ));
+                        }
+                        if !matches!(
+                            mapping.source,
+                            raw::AnalogSource::LeftPad | raw::AnalogSource::RightPad
+                        ) || mapping.target != raw::AnalogTarget::MouseMotion
+                        {
+                            errors.push(format!(
+                                "mode {name:?} axis mapping {index} acceleration is only valid for a trackpad source and mouse-motion target"
+                            ));
+                        }
+                    }
+                    if let Some(exponent) = mapping.exponent
+                        && (!exponent.is_finite() || exponent <= 0.0)
+                    {
+                        errors.push(format!(
+                            "mode {name:?} axis mapping {index} exponent must be finite and greater than zero"
+                        ));
+                    }
+                    if errors.len() != error_count {
+                        return None;
+                    }
+
+                    let options = AxisOptions {
+                        activation,
+                        deadzone: mapping.deadzone.unwrap_or(0.0),
+                        sensitivity: mapping.sensitivity.unwrap_or(1.0),
+                        exponent: match mapping.curve {
+                            raw::Curve::Linear => 1.0,
+                            raw::Curve::Exponential => mapping.exponent.unwrap_or(2.0),
+                        },
+                    };
+                    if scalar_source {
+                        let source = match mapping.source {
+                            raw::AnalogSource::LeftTrigger => Trigger::Left,
+                            raw::AnalogSource::RightTrigger => Trigger::Right,
+                            _ => return None,
+                        };
+                        let target = match mapping.target {
+                            raw::AnalogTarget::GamepadLeftTrigger => Trigger::Left,
+                            raw::AnalogTarget::GamepadRightTrigger => Trigger::Right,
+                            _ => return None,
+                        };
+                        return Some(AxisMapping::Scalar(ScalarAxisMapping {
+                            source,
+                            target,
+                            options,
+                        }));
+                    }
+
+                    let source = match mapping.source {
+                        raw::AnalogSource::LeftStick => VectorSource::LeftStick,
+                        raw::AnalogSource::RightStick => VectorSource::RightStick,
+                        raw::AnalogSource::LeftPad => VectorSource::LeftPad,
+                        raw::AnalogSource::RightPad => VectorSource::RightPad,
+                        raw::AnalogSource::Gyro => VectorSource::Gyro(
+                            mapping
+                                .components
+                                .unwrap_or([AxisComponent::Y, AxisComponent::X]),
+                        ),
+                        raw::AnalogSource::LeftTrigger | raw::AnalogSource::RightTrigger => {
+                            return None;
+                        }
+                    };
+                    let target = match mapping.target {
+                        raw::AnalogTarget::GamepadLeftStick => VectorTarget::GamepadLeftStick,
+                        raw::AnalogTarget::GamepadRightStick => VectorTarget::GamepadRightStick,
+                        raw::AnalogTarget::MouseMotion => VectorTarget::MouseMotion,
+                        raw::AnalogTarget::Scroll => VectorTarget::Scroll,
+                        raw::AnalogTarget::GamepadLeftTrigger
+                        | raw::AnalogTarget::GamepadRightTrigger => return None,
+                    };
+                    Some(AxisMapping::Vector(VectorAxisMapping {
+                        source,
+                        target,
+                        options,
+                        acceleration: mapping.acceleration.unwrap_or(0.0),
+                        invert_x: mapping.invert_x,
+                        invert_y: mapping.invert_y,
+                        swap_xy: mapping.swap_xy,
+                    }))
+                })
+                .collect();
+            modes.push(Mode {
+                gamepad: mode.gamepad,
+                bindings,
+                axes,
+                layers,
+            });
+        }
+
+        if !errors.is_empty() {
+            return Err(ConfigError(errors));
+        }
+
+        Ok(Self {
+            default_mode: resolved_default_mode.expect("validated default mode exists"),
+            mode_switch_haptic,
+            click_pressure: trackpad.click_pressure,
+            osk_bindings,
+            global_bindings,
+            mode_names,
+            modes,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigError(pub Vec<String>);
+
+impl fmt::Display for ConfigError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "invalid configuration")?;
+        for error in &self.0 {
+            write!(formatter, "\n- {error}")?;
+        }
+        Ok(())
+    }
+}
+
+impl error::Error for ConfigError {}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ModeId(usize);
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Mode {
+    pub gamepad: Gamepad,
+    pub bindings: Vec<Binding>,
+    pub axes: Vec<AxisMapping>,
+    pub layers: Vec<Layer>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Layer {
+    pub hold: Button,
+    pub bindings: Vec<Binding>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Binding {
+    pub input: Button,
+    pub action: Action,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GlobalBinding {
+    pub prerequisites: Box<[Button]>,
+    pub trigger: Button,
+    pub action: GlobalAction,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Action {
+    Key(KeyCode),
+    Mouse(MouseButton),
+    Gamepad(GamepadButton),
+    ModeSet(ModeId),
+    ModeNext,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GlobalAction {
+    Action(Action),
+    KeyboardToggle,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum Gamepad {
+    #[default]
+    None,
+    Xbox,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum AxisMapping {
+    Scalar(ScalarAxisMapping),
+    Vector(VectorAxisMapping),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ScalarAxisMapping {
+    pub source: Trigger,
+    pub target: Trigger,
+    pub options: AxisOptions,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct VectorAxisMapping {
+    pub source: VectorSource,
+    pub target: VectorTarget,
+    pub options: AxisOptions,
+    pub acceleration: f32,
+    pub invert_x: bool,
+    pub invert_y: bool,
+    pub swap_xy: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AxisOptions {
+    pub activation: Option<AxisActivation>,
+    pub deadzone: f32,
+    pub sensitivity: f32,
+    pub exponent: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum AxisActivation {
+    Trigger {
+        source: Trigger,
+        engage: f32,
+        release: f32,
+    },
+    Buttons(Buttons),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Trigger {
+    Left,
+    Right,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VectorSource {
+    LeftStick,
+    RightStick,
+    LeftPad,
+    RightPad,
+    Gyro([AxisComponent; 2]),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VectorTarget {
+    GamepadLeftStick,
+    GamepadRightStick,
+    MouseMotion,
+    Scroll,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum AxisComponent {
+    X,
+    Y,
+    Z,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "kebab-case")]
+pub enum MouseButton {
+    Left,
+    Right,
+    Middle,
+    Side,
+    Extra,
+    Forward,
+    Back,
+    Task,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "kebab-case")]
+pub enum GamepadButton {
+    South,
+    East,
+    North,
+    West,
+    LeftBumper,
+    RightBumper,
+    LeftTrigger,
+    RightTrigger,
+    Select,
+    Start,
+    Guide,
+    LeftStick,
+    RightStick,
+    DpadUp,
+    DpadDown,
+    DpadLeft,
+    DpadRight,
+    PaddleLeftUpper,
+    PaddleLeftLower,
+    PaddleRightUpper,
+    PaddleRightLower,
+}
+
+fn convert_global_action(
+    action: raw::Action,
+    mode_names: &IndexMap<String, ModeId>,
+    errors: &mut Vec<String>,
+) -> Option<GlobalAction> {
+    let action = match action {
+        raw::Action::Key { key } => Action::Key(key),
+        raw::Action::Mouse { button } => Action::Mouse(button),
+        raw::Action::Gamepad { button } => Action::Gamepad(button),
+        raw::Action::ModeSet { name } => {
+            let Some(mode) = mode_names.get(&name).copied() else {
+                errors.push(format!("mode-set target {name:?} is not configured"));
+                return None;
+            };
+            Action::ModeSet(mode)
+        }
+        raw::Action::ModeNext => Action::ModeNext,
+        raw::Action::KeyboardToggle => return Some(GlobalAction::KeyboardToggle),
+    };
+    Some(GlobalAction::Action(action))
+}
+
+fn convert_action(
+    action: raw::Action,
+    mode_names: &IndexMap<String, ModeId>,
+    errors: &mut Vec<String>,
+) -> Option<Action> {
+    match convert_global_action(action, mode_names, errors)? {
+        GlobalAction::Action(action) => Some(action),
+        GlobalAction::KeyboardToggle => {
+            errors.push("keyboard-toggle is only valid for global bindings".into());
+            None
+        }
+    }
+}
+
+fn deserialize_key<'de, D>(deserializer: D) -> Result<KeyCode, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let name = String::deserialize(deserializer)?;
+    let name = name.trim();
+    let key = match name {
+        "enter" | "return" => KeyCode::KEY_ENTER,
+        "escape" | "esc" => KeyCode::KEY_ESC,
+        "space" => KeyCode::KEY_SPACE,
+        "tab" => KeyCode::KEY_TAB,
+        "super" | "command" | "cmd" | "meta" => KeyCode::KEY_LEFTMETA,
+        "control" | "ctrl" => KeyCode::KEY_LEFTCTRL,
+        "shift" => KeyCode::KEY_LEFTSHIFT,
+        "alt" => KeyCode::KEY_LEFTALT,
+        "up" => KeyCode::KEY_UP,
+        "down" => KeyCode::KEY_DOWN,
+        "left" => KeyCode::KEY_LEFT,
+        "right" => KeyCode::KEY_RIGHT,
+        _ => {
+            let prefixed = name.get(..4).is_some_and(|prefix| {
+                prefix.eq_ignore_ascii_case("key_") || prefix.eq_ignore_ascii_case("btn_")
+            });
+            let mut code = String::with_capacity(name.len() + 4);
+            if !prefixed {
+                code.push_str("KEY_");
+            }
+            for character in name.chars() {
+                if prefixed || !matches!(character, '-' | '_') {
+                    code.extend(character.to_uppercase());
+                }
+            }
+            KeyCode::from_str(&code)
+                .map_err(|_| serde::de::Error::custom(format!("unknown key {name:?}")))?
+        }
+    };
+    if !is_keyboard_key(key) {
+        return Err(serde::de::Error::custom(format!(
+            "{name:?} is not a keyboard key"
+        )));
+    }
+    Ok(key)
+}
+
+pub const fn is_keyboard_key(key: KeyCode) -> bool {
+    let code = key.code();
+    code != 0
+        && code <= 0x2ff
+        && !(code >= 0x100 && code <= 0x15f)
+        && !(code >= 0x220 && code <= 0x22f)
+        && !(code >= 0x2c0 && code <= 0x2ff)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_into_semantic_configuration() {
+        let config = Config::parse(
+            r#"
+                version = 1
+                default_mode = "desktop"
+
+                [osk.bind]
+                l4 = "super"
+                left-trigger-click = "shift"
+
+                [[global.bind]]
+                chord = ["steam", "x"]
+                action = { type = "keyboard-toggle" }
+
+                [mode.desktop]
+                gamepad = "none"
+                [[mode.desktop.bind]]
+                input = "l4"
+                action = { type = "key", key = "super" }
+                [[mode.desktop.bind]]
+                input = "x"
+                action = { type = "mode-set", name = "anything at all" }
+                [[mode.desktop.axis]]
+                source = "gyro"
+                target = "mouse-motion"
+                curve = "exponential"
+
+                [mode.desktop.layer.apps]
+                hold = "left-bumper"
+                [[mode.desktop.layer.apps.bind]]
+                input = "b"
+                action = { type = "key", key = "q" }
+
+                [mode."anything at all"]
+                gamepad = "xbox"
+            "#,
+        )
+        .unwrap();
+
+        let desktop = config.mode_id("desktop").unwrap();
+        let other = config.mode_id("anything at all").unwrap();
+        let mode = config.mode(desktop);
+        assert_eq!(config.default_mode, desktop);
+        assert_eq!(config.mode_name(other), "anything at all");
+        assert_eq!(config.osk_bindings[&Button::L4], KeyCode::KEY_LEFTMETA);
+        assert_eq!(
+            config.osk_bindings[&Button::LeftTriggerClick],
+            KeyCode::KEY_LEFTSHIFT
+        );
+        assert_eq!(
+            config.global_bindings[0].prerequisites.as_ref(),
+            [Button::Steam]
+        );
+        assert_eq!(config.global_bindings[0].trigger, Button::X);
+        assert_eq!(mode.gamepad, Gamepad::None);
+        assert_eq!(mode.bindings[0].action, Action::Key(KeyCode::KEY_LEFTMETA));
+        assert_eq!(mode.bindings[1].action, Action::ModeSet(other));
+        assert_eq!(
+            mode.layers[0].bindings[0].action,
+            Action::Key(KeyCode::KEY_Q)
+        );
+        let AxisMapping::Vector(axis) = &mode.axes[0] else {
+            panic!("expected vector axis");
+        };
+        assert_eq!(
+            axis.source,
+            VectorSource::Gyro([AxisComponent::Y, AxisComponent::X])
+        );
+        assert_eq!(axis.options.exponent, 2.0);
+        assert_eq!(config.mode(other).gamepad, Gamepad::Xbox);
+    }
+
+    #[test]
+    fn reports_all_validation_errors() {
+        let error = Config::parse(
+            r#"
+                version = 2
+                default_mode = "missing"
+
+                [trackpad]
+                click_pressure = 101
+
+                [osk.bind]
+                left-pad-click = "enter"
+
+                [[global.bind]]
+                chord = []
+                action = { type = "mode-set", name = "also missing" }
+
+                [mode.one]
+                [[mode.one.bind]]
+                input = "a"
+                action = { type = "keyboard-toggle" }
+            "#,
+        )
+        .unwrap_err();
+
+        assert_eq!(error.0.len(), 7);
+        let report = error.to_string();
+        for expected in [
+            "version must be 1",
+            "does not name a configured mode",
+            "click_pressure must be in [0, 100]",
+            "reserved for keyboard pointing",
+            "chord must not be empty",
+            "mode-set target \"also missing\" is not configured",
+            "keyboard-toggle is only valid for global bindings",
+        ] {
+            assert!(
+                report.contains(expected),
+                "missing {expected:?} in {report}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_digital_configuration() {
+        for (body, expected) in [
+            (
+                r#"
+                    [[global.bind]]
+                    chord = ["steam", "steam"]
+                    action = { type = "mode-next" }
+                    [mode.one]
+                "#,
+                "duplicate button",
+            ),
+            (
+                r#"
+                    [osk.bind]
+                    left-pad-click = "enter"
+                    [mode.one]
+                "#,
+                "reserved for keyboard pointing",
+            ),
+            (
+                r#"
+                    [mode.one]
+                    [[mode.one.bind]]
+                    input = "left-bumper"
+                    action = { type = "key", key = "q" }
+                    [mode.one.layer.apps]
+                    hold = "left-bumper"
+                "#,
+                "must not also be a mode binding",
+            ),
+            (
+                r#"
+                    [mode.one]
+                    [[mode.one.bind]]
+                    input = "a"
+                    action = { type = "mode-set", name = "missing" }
+                "#,
+                "mode-set target",
+            ),
+            (
+                r#"
+                    [mode.one]
+                    [[mode.one.bind]]
+                    input = "a"
+                    action = { type = "keyboard-toggle" }
+                "#,
+                "only valid for global bindings",
+            ),
+        ] {
+            let source = format!("version = 1\ndefault_mode = \"one\"\n{body}");
+            assert!(
+                Config::parse(&source)
+                    .unwrap_err()
+                    .to_string()
+                    .contains(expected)
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_analog_configuration() {
+        for (mapping, expected) in [
+            (
+                r#"source = "right-pad"
+                   target = "mouse-motion"
+                   acceleration = -1.0"#,
+                "acceleration must be finite and non-negative",
+            ),
+            (
+                r#"source = "right-stick"
+                   target = "mouse-motion"
+                   acceleration = 1.0"#,
+                "acceleration is only valid",
+            ),
+            (
+                r#"source = "right-trigger"
+                   target = "mouse-motion""#,
+                "scalar source",
+            ),
+            (
+                r#"source = "gyro"
+                   target = "gamepad-right-stick"
+                   activation = { source = "left-trigger", engage = 0.1, release = 0.2 }"#,
+                "activation thresholds",
+            ),
+        ] {
+            let source = format!(
+                "version = 1\ndefault_mode = \"one\"\n[mode.one]\n[[mode.one.axis]]\n{mapping}"
+            );
+            assert!(
+                Config::parse(&source)
+                    .unwrap_err()
+                    .to_string()
+                    .contains(expected)
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_non_keyboard_key_codes() {
+        for code in [
+            "KEY_RESERVED",
+            "BTN_LEFT",
+            "BTN_DPAD_UP",
+            "BTN_TRIGGER_HAPPY1",
+        ] {
+            let source = format!(
+                r#"
+                    version = 1
+                    default_mode = "one"
+                    [mode.one]
+                    [[mode.one.bind]]
+                    input = "a"
+                    action = {{ type = "key", key = "{code}" }}
+                "#
+            );
+            assert!(
+                Config::parse(&source)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("is not a keyboard key")
+            );
+        }
+    }
+}

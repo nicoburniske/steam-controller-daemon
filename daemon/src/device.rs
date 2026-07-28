@@ -139,14 +139,9 @@ impl DeviceManager {
             let active = self
                 .active
                 .ok_or_else(|| scd::Error::message("controller is not connected"))?;
-            let hidraw = Path::new(
-                self.slots[active]
-                    .path
-                    .to_str()
-                    .map_err(scd::Error::message)?,
-            )
-            .file_name()
-            .ok_or_else(|| scd::Error::message("controller has no hidraw device name"))?;
+            let hidraw = Path::new(self.slots[active].path.to_str()?)
+                .file_name()
+                .ok_or_else(|| scd::Error::message("controller has no hidraw device name"))?;
             let sysfs =
                 fs::canonicalize(Path::new("/sys/class/hidraw").join(hidraw).join("device"))?;
             let bus_id = sysfs

@@ -13,6 +13,7 @@ use output::Outputs;
 use scd::Result;
 use scd::config::{Config, Gamepad, is_keyboard_key};
 use scd::ipc::{OskPad, OskPadSide, OskState, Request, Response, Status};
+use std::fs;
 use std::path::PathBuf;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -32,8 +33,8 @@ fn main() -> Result<()> {
         config: config_path,
         socket,
     } = Args::parse();
-    let config = Config::load(&config_path)?;
-    let mut device = DeviceManager::new(config.trackpads.click_pressure)?;
+    let config = Config::parse(&fs::read_to_string(&config_path)?)?;
+    let mut device = DeviceManager::new(config.click_pressure)?;
     let mut mapper = Mapper::new(config);
     let mut mapped = Vec::new();
     let gamepad = if device.steam_enabled() {
@@ -101,25 +102,29 @@ fn main() -> Result<()> {
                         message: error.to_string(),
                     },
                 },
-                Request::Reload => match Config::load(&config_path) {
-                    Ok(config) => {
-                        device.set_trackpad_click_pressure(config.trackpads.click_pressure)?;
-                        mapper.reload(config, &mut mapped);
-                        keyboard.set_bindings(mapper.osk_bindings());
-                        emit(
-                            &mut mapped,
-                            &mut mapper,
-                            &mut outputs,
-                            &device,
-                            &mut keyboard,
-                        )?;
-                        publish_keyboard(&mapper, &mut keyboard, &mut ipc);
-                        Response::Done
+                Request::Reload => {
+                    let source = fs::read_to_string(&config_path)?;
+                    let config = Config::parse(&source);
+                    match config {
+                        Ok(config) => {
+                            device.set_trackpad_click_pressure(config.click_pressure)?;
+                            mapper.reload(config, &mut mapped);
+                            keyboard.set_bindings(mapper.osk_bindings());
+                            emit(
+                                &mut mapped,
+                                &mut mapper,
+                                &mut outputs,
+                                &device,
+                                &mut keyboard,
+                            )?;
+                            publish_keyboard(&mapper, &mut keyboard, &mut ipc);
+                            Response::Done
+                        }
+                        Err(error) => Response::Error {
+                            message: error.to_string(),
+                        },
                     }
-                    Err(error) => Response::Error {
-                        message: error.to_string(),
-                    },
-                },
+                }
                 Request::Steam { enabled } => match device.set_steam(*enabled) {
                     Ok(()) => {
                         if *enabled {
