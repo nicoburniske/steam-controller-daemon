@@ -4,8 +4,9 @@ use indexmap::IndexMap;
 use scd::{
     Error, Result,
     config::{
-        Action, AxisActivation, AxisComponent, AxisMapping, Config, Gamepad, GamepadButton,
-        GlobalAction, ModeId, MouseButton, Trigger, VectorSource, VectorTarget,
+        Action, AxisActivation, AxisComponent, AxisMapping, AxisOptions, Binding, Config, Gamepad,
+        GamepadButton, GlobalAction, ModeId, MouseButton, Trigger, VectorAxisMapping, VectorSource,
+        VectorTarget,
     },
     protocol::{Button, Buttons, ControllerState, Haptic, StateFormat, TouchpadState, Trackpad},
 };
@@ -119,11 +120,16 @@ impl Mapper {
         keyboard_visible: bool,
         outputs: &mut Vec<Output>,
     ) {
-        let mut interrupted = false;
+        let previous = self.previous.replace(*state);
+        let previous_buttons = previous.map_or(Buttons::default(), |state| state.buttons);
 
+        // global chords
+        let mut reserved = Buttons::default();
+        let mut captured = Buttons::default();
         for index in 0..self.config.global_bindings.len() {
-            let was_active = self.global[index].active;
             let binding = &self.config.global_bindings[index];
+            let runtime = &mut self.global[index];
+            let was_active = runtime.active;
             let trigger = binding.trigger;
             let all_active = state.buttons.contains(trigger)
                 && binding
@@ -131,35 +137,40 @@ impl Mapper {
                     .iter()
                     .all(|button| state.buttons.contains(*button));
             let pressed = all_active
-                && !self
-                    .previous
-                    .as_ref()
-                    .is_some_and(|previous| previous.buttons.contains(trigger))
-                && binding.prerequisites.iter().all(|button| {
-                    self.previous
-                        .as_ref()
-                        .is_some_and(|previous| previous.buttons.contains(*button))
-                });
+                && !previous_buttons.contains(trigger)
+                && binding
+                    .prerequisites
+                    .iter()
+                    .all(|button| previous_buttons.contains(*button));
             let active = if was_active { all_active } else { pressed };
-            self.global[index].active = active;
+            runtime.active = active;
             if pressed {
-                self.global[index].captured = true;
-            } else if self.global[index].captured && !state.buttons.contains(trigger) {
-                self.global[index].captured = false;
+                runtime.captured = true;
+            } else if runtime.captured && !state.buttons.contains(trigger) {
+                runtime.captured = false;
+            }
+
+            for button in binding
+                .prerequisites
+                .iter()
+                .copied()
+                .chain([binding.trigger])
+            {
+                if runtime.captured {
+                    captured.insert(button);
+                } else if !state.buttons.contains(button) {
+                    break;
+                }
+                reserved.insert(button);
             }
 
             let action = binding.action;
             let should_apply = pressed
                 || (was_active
                     && !active
-                    && matches!(
-                        action,
-                        GlobalAction::Action(
-                            Action::Key(_) | Action::Mouse(_) | Action::Gamepad(_)
-                        )
-                    ));
+                    && matches!(action, GlobalAction::Action(action) if HeldOutput::from_action(action).is_some()));
             if should_apply {
-                interrupted |= match action {
+                let interrupted = match action {
                     GlobalAction::Action(action) => self.apply_action(action, active, outputs).0,
                     GlobalAction::KeyboardToggle => {
                         outputs.push(Output::KeyboardToggle);
@@ -167,37 +178,16 @@ impl Mapper {
                     }
                 };
                 if interrupted {
-                    break;
+                    return;
                 }
             }
         }
 
-        let mut reserved = Buttons::default();
-        for (binding, runtime) in self.config.global_bindings.iter().zip(&self.global) {
-            for button in binding
-                .prerequisites
-                .iter()
-                .copied()
-                .chain([binding.trigger])
-                .take_while(|button| runtime.captured || state.buttons.contains(*button))
-            {
-                reserved.insert(button);
-            }
-        }
-
-        if !interrupted {
-            for index in 0..self.config.osk_bindings.len() {
-                let (input, key) = {
-                    let (input, key) = self
-                        .config
-                        .osk_bindings
-                        .get_index(index)
-                        .expect("OSK binding index is valid");
-                    (*input, *key)
-                };
+        // osk bindings
+        if keyboard_visible {
+            for (&input, &key) in &self.config.osk_bindings {
                 let was_active = self.osk_active.contains(input);
-                let active =
-                    keyboard_visible && state.buttons.contains(input) && !reserved.contains(input);
+                let active = state.buttons.contains(input) && !reserved.contains(input);
                 if active == was_active {
                     continue;
                 }
@@ -206,417 +196,237 @@ impl Mapper {
                 } else {
                     self.osk_active.remove(input);
                 }
-                self.set_held(HeldOutput::Key(key), active, outputs);
+                set_held(&mut self.held, HeldOutput::Key(key), active, outputs);
+            }
+            self.process_trackpad_haptics(state, previous_buttons, outputs);
+            return;
+        }
+
+        self.quarantined.remove_inactive(state.buttons);
+
+        // route releases
+        let mut index = self.routes.len();
+        while index != 0 {
+            index -= 1;
+            let route = &self.routes[index];
+            let released = !state.buttons.contains(route.input);
+            let hold_lost = route
+                .hold
+                .is_some_and(|hold| !state.buttons.contains(hold) || reserved.contains(hold));
+            if !released && !hold_lost && !captured.contains(route.input) {
+                continue;
+            }
+
+            let route = self.routes.remove(index);
+            if state.buttons.contains(route.input) {
+                self.quarantined.insert(route.input);
+            }
+            if let Some(held) = route.held {
+                set_held(&mut self.held, held, false, outputs);
             }
         }
 
-        if !keyboard_visible && !interrupted {
-            self.quarantined.remove_inactive(state.buttons);
-
-            let mut index = self.routes.len();
-            while index != 0 {
-                index -= 1;
-                let route = &self.routes[index];
-                let released = !state.buttons.contains(route.input);
-                let hold_lost = route
-                    .hold
-                    .is_some_and(|hold| !state.buttons.contains(hold) || reserved.contains(hold));
-                let captured = self.config.global_bindings.iter().zip(&self.global).any(
-                    |(binding, runtime)| {
-                        runtime.captured
-                            && (binding.trigger == route.input
-                                || binding.prerequisites.contains(&route.input))
-                    },
-                );
-                if !released && !hold_lost && !captured {
-                    continue;
-                }
-
-                let route = self.routes.remove(index);
-                if state.buttons.contains(route.input) && !self.quarantined.contains(route.input) {
-                    self.quarantined.insert(route.input);
-                }
-                if let Some(held) = route.held {
-                    self.set_held(held, false, outputs);
-                }
-            }
-
-            let binding_count = self.mode().bindings.len();
-            for index in 0..binding_count {
-                let input = self.mode().bindings[index].input;
-                if !button_pressed(input, state, self.previous.as_ref())
-                    || self.routes.iter().any(|route| route.input == input)
-                    || self.quarantined.contains(input)
-                    || reserved.contains(input)
-                {
-                    continue;
-                }
-                let overridden = self.mode().layers.iter().any(|layer| {
-                    state.buttons.contains(layer.hold)
-                        && !reserved.contains(layer.hold)
-                        && layer.bindings.iter().any(|binding| binding.input == input)
-                });
-                if overridden {
-                    continue;
-                }
-
-                let action = self.mode().bindings[index].action;
-                let (stop, held) = self.apply_action(action, true, outputs);
-                interrupted |= stop;
-                if interrupted {
-                    break;
-                }
-                self.routes.push(ActiveRoute {
-                    input,
-                    hold: None,
-                    held,
-                });
-            }
-        }
-
-        if !keyboard_visible && !interrupted {
-            let layer_count = self.mode().layers.len();
-            for layer_index in 0..layer_count {
-                let hold = self.mode().layers[layer_index].hold;
-                if !state.buttons.contains(hold) || reserved.contains(hold) {
-                    continue;
-                }
-                let binding_count = self.mode().layers[layer_index].bindings.len();
-                for binding_index in 0..binding_count {
-                    let input = self.mode().layers[layer_index].bindings[binding_index].input;
-                    if !button_pressed(input, state, self.previous.as_ref())
-                        || self.routes.iter().any(|route| route.input == input)
-                        || self.quarantined.contains(input)
-                        || reserved.contains(input)
-                    {
-                        continue;
-                    }
-
-                    let action = self.mode().layers[layer_index].bindings[binding_index].action;
-                    let (stop, held) = self.apply_action(action, true, outputs);
-                    interrupted |= stop;
-                    if interrupted {
-                        break;
-                    }
-                    self.routes.push(ActiveRoute {
-                        input,
-                        hold: Some(hold),
-                        held,
-                    });
-                }
-                if interrupted {
-                    break;
+        // layer overrides
+        let mut overridden = Buttons::default();
+        for layer in &self.mode().layers {
+            if state.buttons.contains(layer.hold) && !reserved.contains(layer.hold) {
+                for binding in &layer.bindings {
+                    overridden.insert(binding.input);
                 }
             }
         }
 
-        if !keyboard_visible && !interrupted {
-            let mut gamepad = [0.0; 6];
-            let mapping_count = self.mode().axes.len();
-            for index in 0..mapping_count {
-                let was_active = self.axis_active[index];
-                let mapping = &self.config.mode(self.active_mode).axes[index];
-                let options = match mapping {
-                    AxisMapping::Scalar(mapping) => mapping.options,
-                    AxisMapping::Vector(mapping) => mapping.options,
-                };
-                let active = options
-                    .activation
-                    .is_none_or(|activation| match activation {
-                        AxisActivation::Trigger {
-                            source,
-                            engage,
-                            release,
-                        } => {
-                            let value = match source {
-                                Trigger::Left => state.triggers[0],
-                                Trigger::Right => state.triggers[1],
-                            };
-                            if was_active {
-                                value > release
-                            } else {
-                                value >= engage
-                            }
-                        }
-                        AxisActivation::Buttons(buttons) => state.buttons.contains_all(buttons),
-                    });
-                self.axis_active[index] = active;
-                if !active {
-                    continue;
-                }
+        // base bindings
+        let binding_count = self.mode().bindings.len();
+        for index in 0..binding_count {
+            let binding = self.mode().bindings[index];
+            if overridden.contains(binding.input) {
+                continue;
+            }
+            if self.route_binding(
+                binding,
+                None,
+                state.buttons,
+                previous_buttons,
+                reserved,
+                outputs,
+            ) {
+                return;
+            }
+        }
 
-                match mapping {
-                    AxisMapping::Scalar(mapping) => {
-                        let mut value = match mapping.source {
-                            Trigger::Left => state.triggers[0],
-                            Trigger::Right => state.triggers[1],
-                        };
-                        value = if value <= options.deadzone {
-                            0.0
+        // layer bindings
+        let layer_count = self.mode().layers.len();
+        for layer_index in 0..layer_count {
+            let hold = self.mode().layers[layer_index].hold;
+            if !state.buttons.contains(hold) || reserved.contains(hold) {
+                continue;
+            }
+            let binding_count = self.mode().layers[layer_index].bindings.len();
+            for binding_index in 0..binding_count {
+                let binding = self.mode().layers[layer_index].bindings[binding_index];
+                if self.route_binding(
+                    binding,
+                    Some(hold),
+                    state.buttons,
+                    previous_buttons,
+                    reserved,
+                    outputs,
+                ) {
+                    return;
+                }
+            }
+        }
+
+        // axes
+        let mut gamepad = [0.0; 6];
+        let mapping_count = self.mode().axes.len();
+        for index in 0..mapping_count {
+            let was_active = self.axis_active[index];
+            let mapping = &self.config.mode(self.active_mode).axes[index];
+            let options = match mapping {
+                AxisMapping::Scalar(mapping) => mapping.options,
+                AxisMapping::Vector(mapping) => mapping.options,
+            };
+            let active = options
+                .activation
+                .is_none_or(|activation| match activation {
+                    AxisActivation::Trigger {
+                        source,
+                        engage,
+                        release,
+                    } => {
+                        let value = trigger_value(source, state);
+                        if was_active {
+                            value > release
                         } else {
-                            (value - options.deadzone) / (1.0 - options.deadzone)
-                        };
-                        value = value.powf(options.exponent) * options.sensitivity;
-                        gamepad[match mapping.target {
-                            Trigger::Left => GamepadAxis::LeftTrigger,
-                            Trigger::Right => GamepadAxis::RightTrigger,
-                        } as usize] = value;
-                    }
-                    AxisMapping::Vector(mapping) => {
-                        if mapping.target == VectorTarget::Scroll {
-                            let pads = match mapping.source {
-                                VectorSource::LeftPad => Some((
-                                    state.left_pad,
-                                    self.previous.as_ref().map(|state| state.left_pad),
-                                )),
-                                VectorSource::RightPad => Some((
-                                    state.right_pad,
-                                    self.previous.as_ref().map(|state| state.right_pad),
-                                )),
-                                _ => None,
-                            };
-                            if let Some((pad, previous_pad)) = pads {
-                                let mut value = if !pad.touched {
-                                    [0.0, 0.0]
-                                } else if let Some(previous_pad) =
-                                    previous_pad.filter(|pad| pad.touched)
-                                {
-                                    if pad.position[0].hypot(pad.position[1])
-                                        < TRACKPAD_SCROLL_MIN_RADIUS
-                                        || previous_pad.position[0].hypot(previous_pad.position[1])
-                                            < TRACKPAD_SCROLL_MIN_RADIUS
-                                    {
-                                        [0.0, 0.0]
-                                    } else {
-                                        let cross = previous_pad.position[0] * pad.position[1]
-                                            - previous_pad.position[1] * pad.position[0];
-                                        let dot = previous_pad.position[0] * pad.position[0]
-                                            + previous_pad.position[1] * pad.position[1];
-                                        [0.0, cross.atan2(dot) * options.sensitivity]
-                                    }
-                                } else {
-                                    [0.0, 0.0]
-                                };
-                                if mapping.swap_xy {
-                                    value.swap(0, 1);
-                                }
-                                if mapping.invert_x {
-                                    value[0] = -value[0];
-                                }
-                                if mapping.invert_y {
-                                    value[1] = -value[1];
-                                }
-                                if value[0] != 0.0 || value[1] != 0.0 {
-                                    outputs.push(Output::Scroll {
-                                        x: value[0],
-                                        y: value[1],
-                                    });
-                                }
-                                continue;
-                            }
+                            value >= engage
                         }
+                    }
+                    AxisActivation::Buttons(buttons) => state.buttons.contains_all(buttons),
+                });
+            self.axis_active[index] = active;
+            if !active {
+                continue;
+            }
 
-                        let relative_gyro_seconds =
-                            if matches!(mapping.source, VectorSource::Gyro(_))
-                                && matches!(
-                                    mapping.target,
-                                    VectorTarget::MouseMotion | VectorTarget::Scroll
-                                )
-                            {
-                                self.previous
-                                    .as_ref()
-                                    .filter(|previous| previous.format == state.format)
-                                    .and_then(|previous| {
-                                        let delta_us = timestamp_delta_us(
-                                            state.format,
-                                            state.imu_timestamp_us,
-                                            previous.imu_timestamp_us,
-                                        );
-                                        (1..=100_000)
-                                            .contains(&delta_us)
-                                            .then_some(delta_us as f32 / 1_000_000.0)
-                                    })
-                                    .unwrap_or(0.0)
-                            } else {
-                                1.0
-                            };
-                        let mut value = match mapping.source {
-                            VectorSource::LeftStick => state.left_stick,
-                            VectorSource::RightStick => state.right_stick,
-                            VectorSource::LeftPad => {
-                                if !state.left_pad.touched {
-                                    [0.0, 0.0]
-                                } else if matches!(
-                                    mapping.target,
-                                    VectorTarget::MouseMotion | VectorTarget::Scroll
-                                ) {
-                                    self.previous
-                                        .as_ref()
-                                        .filter(|state| state.left_pad.touched)
-                                        .map_or([0.0, 0.0], |previous| {
-                                            [
-                                                state.left_pad.position[0]
-                                                    - previous.left_pad.position[0],
-                                                state.left_pad.position[1]
-                                                    - previous.left_pad.position[1],
-                                            ]
-                                        })
-                                } else {
-                                    state.left_pad.position
-                                }
-                            }
-                            VectorSource::RightPad => {
-                                if !state.right_pad.touched {
-                                    [0.0, 0.0]
-                                } else if matches!(
-                                    mapping.target,
-                                    VectorTarget::MouseMotion | VectorTarget::Scroll
-                                ) {
-                                    self.previous
-                                        .as_ref()
-                                        .filter(|state| state.right_pad.touched)
-                                        .map_or([0.0, 0.0], |previous| {
-                                            [
-                                                state.right_pad.position[0]
-                                                    - previous.right_pad.position[0],
-                                                state.right_pad.position[1]
-                                                    - previous.right_pad.position[1],
-                                            ]
-                                        })
-                                } else {
-                                    state.right_pad.position
-                                }
-                            }
-                            VectorSource::Gyro(components) => {
-                                components.map(|component| match component {
-                                    AxisComponent::X => state.gyro[0],
-                                    AxisComponent::Y => state.gyro[1],
-                                    AxisComponent::Z => state.gyro[2],
+            match mapping {
+                AxisMapping::Scalar(mapping) => {
+                    let value = scale_axis(trigger_value(mapping.source, state), options);
+                    gamepad[match mapping.target {
+                        Trigger::Left => GamepadAxis::LeftTrigger,
+                        Trigger::Right => GamepadAxis::RightTrigger,
+                    } as usize] = value;
+                }
+                AxisMapping::Vector(mapping) => {
+                    if mapping.target == VectorTarget::Scroll {
+                        if let Some(pad) = touchpad(mapping.source, state) {
+                            let previous_pad = previous
+                                .as_ref()
+                                .and_then(|state| touchpad(mapping.source, state));
+                            let value = previous_pad
+                                .filter(|previous_pad| {
+                                    pad.touched
+                                        && previous_pad.touched
+                                        && pad.position[0].hypot(pad.position[1])
+                                            >= TRACKPAD_SCROLL_MIN_RADIUS
+                                        && previous_pad.position[0].hypot(previous_pad.position[1])
+                                            >= TRACKPAD_SCROLL_MIN_RADIUS
                                 })
-                            }
-                        };
-                        if mapping.swap_xy {
-                            value.swap(0, 1);
-                        }
-                        if mapping.invert_x {
-                            value[0] = -value[0];
-                        }
-                        if mapping.invert_y {
-                            value[1] = -value[1];
-                        }
-
-                        let magnitude = value[0].hypot(value[1]);
-                        let value = if magnitude <= options.deadzone {
-                            [0.0, 0.0]
-                        } else {
-                            let acceleration_gain = if mapping.acceleration > 0.0 {
-                                self.previous
-                                    .as_ref()
-                                    .filter(|previous| previous.format == state.format)
-                                    .and_then(|previous| {
-                                        let (current_timestamp_us, previous_timestamp_us) = match (
-                                            state.trackpad_timestamp_us,
-                                            previous.trackpad_timestamp_us,
-                                        ) {
-                                            (Some(current), Some(previous)) => (current, previous),
-                                            _ => {
-                                                (state.imu_timestamp_us, previous.imu_timestamp_us)
-                                            }
-                                        };
-                                        let delta_us = timestamp_delta_us(
-                                            state.format,
-                                            current_timestamp_us,
-                                            previous_timestamp_us,
-                                        );
-                                        (1..=100_000)
-                                            .contains(&delta_us)
-                                            .then_some(delta_us as f32 / 1_000_000.0)
-                                    })
-                                    .map_or(1.0, |seconds| {
-                                        let speed = magnitude / seconds;
-                                        1.0 + mapping.acceleration
-                                            * (1.0 - (-(speed / 4.0).powi(2)).exp())
-                                    })
-                            } else {
-                                1.0
-                            };
-                            let scaled_magnitude = ((magnitude - options.deadzone)
-                                / (1.0 - options.deadzone))
-                                .powf(options.exponent)
-                                * options.sensitivity
-                                * acceleration_gain
-                                * relative_gyro_seconds;
-                            [
-                                value[0] / magnitude * scaled_magnitude,
-                                value[1] / magnitude * scaled_magnitude,
-                            ]
-                        };
-                        let [x, y] = value;
-                        match mapping.target {
-                            VectorTarget::GamepadLeftStick => {
-                                gamepad[GamepadAxis::LeftX as usize] += x;
-                                gamepad[GamepadAxis::LeftY as usize] += y;
-                            }
-                            VectorTarget::GamepadRightStick => {
-                                gamepad[GamepadAxis::RightX as usize] += x;
-                                gamepad[GamepadAxis::RightY as usize] += y;
-                            }
-                            VectorTarget::MouseMotion => {
-                                if x != 0.0 || y != 0.0 {
-                                    outputs.push(Output::MouseMotion { x, y });
-                                }
-                            }
-                            VectorTarget::Scroll => {
-                                if x != 0.0 || y != 0.0 {
-                                    outputs.push(Output::Scroll { x, y });
-                                }
-                            }
+                                .map_or([0.0, 0.0], |previous_pad| {
+                                    let cross = previous_pad.position[0] * pad.position[1]
+                                        - previous_pad.position[1] * pad.position[0];
+                                    let dot = previous_pad.position[0] * pad.position[0]
+                                        + previous_pad.position[1] * pad.position[1];
+                                    [0.0, cross.atan2(dot) * options.sensitivity]
+                                });
+                            emit_vector(
+                                mapping.target,
+                                orient_vector(value, mapping),
+                                &mut gamepad,
+                                outputs,
+                            );
+                            continue;
                         }
                     }
+
+                    let relative = matches!(
+                        mapping.target,
+                        VectorTarget::MouseMotion | VectorTarget::Scroll
+                    );
+                    let gyro_seconds =
+                        if matches!(mapping.source, VectorSource::Gyro(_)) && relative {
+                            frame_seconds(state, previous.as_ref(), false).unwrap_or(0.0)
+                        } else {
+                            1.0
+                        };
+                    let value = match mapping.source {
+                        VectorSource::LeftStick => state.left_stick,
+                        VectorSource::RightStick => state.right_stick,
+                        source @ (VectorSource::LeftPad | VectorSource::RightPad) => {
+                            let pad = touchpad(source, state).expect("source is a touchpad");
+                            if !pad.touched {
+                                [0.0, 0.0]
+                            } else if relative {
+                                previous
+                                    .as_ref()
+                                    .and_then(|state| touchpad(source, state))
+                                    .filter(|pad| pad.touched)
+                                    .map_or([0.0, 0.0], |previous_pad| {
+                                        [
+                                            pad.position[0] - previous_pad.position[0],
+                                            pad.position[1] - previous_pad.position[1],
+                                        ]
+                                    })
+                            } else {
+                                pad.position
+                            }
+                        }
+                        VectorSource::Gyro(components) => {
+                            components.map(|component| match component {
+                                AxisComponent::X => state.gyro[0],
+                                AxisComponent::Y => state.gyro[1],
+                                AxisComponent::Z => state.gyro[2],
+                            })
+                        }
+                    };
+                    let value = orient_vector(value, mapping);
+
+                    let magnitude = value[0].hypot(value[1]);
+                    let value = if magnitude <= options.deadzone {
+                        [0.0, 0.0]
+                    } else {
+                        let acceleration_gain = if mapping.acceleration > 0.0 {
+                            frame_seconds(state, previous.as_ref(), true).map_or(1.0, |seconds| {
+                                let speed = magnitude / seconds;
+                                1.0 + mapping.acceleration * (1.0 - (-(speed / 4.0).powi(2)).exp())
+                            })
+                        } else {
+                            1.0
+                        };
+                        let scaled_magnitude =
+                            scale_axis(magnitude, options) * acceleration_gain * gyro_seconds;
+                        [
+                            value[0] / magnitude * scaled_magnitude,
+                            value[1] / magnitude * scaled_magnitude,
+                        ]
+                    };
+                    emit_vector(mapping.target, value, &mut gamepad, outputs);
                 }
             }
-            for axis in GAMEPAD_AXES {
-                let value = gamepad[axis as usize];
-                let value = if matches!(axis, GamepadAxis::LeftTrigger | GamepadAxis::RightTrigger)
-                {
-                    value.clamp(0.0, 1.0)
-                } else {
-                    value.clamp(-1.0, 1.0)
-                };
-                self.set_gamepad_axis(axis, value, outputs);
-            }
+        }
+        for axis in GAMEPAD_AXES {
+            let value = gamepad[axis as usize];
+            let value = if matches!(axis, GamepadAxis::LeftTrigger | GamepadAxis::RightTrigger) {
+                value.clamp(0.0, 1.0)
+            } else {
+                value.clamp(-1.0, 1.0)
+            };
+            self.set_gamepad_axis(axis, value, outputs);
         }
 
-        if !interrupted {
-            let timestamp_us = state
-                .trackpad_timestamp_us
-                .unwrap_or(state.imu_timestamp_us);
-            for (pad, pad_state) in [
-                (Trackpad::Left, state.left_pad),
-                (Trackpad::Right, state.right_pad),
-            ] {
-                let click = button_pressed(
-                    match pad {
-                        Trackpad::Left => Button::LeftPadClick,
-                        Trackpad::Right => Button::RightPadClick,
-                    },
-                    state,
-                    self.previous.as_ref(),
-                );
-                if click
-                    || trackpad_haptic(
-                        &mut self.trackpad_haptics[pad as usize],
-                        pad_state,
-                        state.format,
-                        timestamp_us,
-                    )
-                {
-                    outputs.push(Output::TrackpadHaptic { pad });
-                }
-            }
-        }
-
-        self.previous = Some(*state);
+        // trackpad haptics
+        self.process_trackpad_haptics(state, previous_buttons, outputs);
     }
 
     pub fn set_mode(&mut self, name: &str, outputs: &mut Vec<Output>) -> Result<()> {
@@ -639,19 +449,13 @@ impl Mapper {
         self.release_outputs(outputs);
         self.active_mode = active_mode;
         self.config = config;
-        self.global = vec![GlobalState::default(); self.config.global_bindings.len()];
-        self.axis_active = vec![false; self.mode().axes.len()];
-        self.trackpad_haptics = Default::default();
-        outputs.push(Output::ModeChanged {
-            name: self.active_mode().to_owned(),
-            haptic: self.config.mode_switch_haptic,
-        });
+        self.reset_runtime();
+        outputs.push(self.mode_changed());
     }
 
     pub fn release_all(&mut self, outputs: &mut Vec<Output>) {
         self.release_outputs(outputs);
-        self.global.fill(GlobalState::default());
-        self.trackpad_haptics = Default::default();
+        self.reset_runtime();
         self.previous = None;
     }
 
@@ -685,38 +489,84 @@ impl Mapper {
         self.config.mode(self.active_mode)
     }
 
+    fn process_trackpad_haptics(
+        &mut self,
+        state: &ControllerState,
+        previous_buttons: Buttons,
+        outputs: &mut Vec<Output>,
+    ) {
+        let timestamp_us = state
+            .trackpad_timestamp_us
+            .unwrap_or(state.imu_timestamp_us);
+        for (pad, pad_state, click) in [
+            (Trackpad::Left, state.left_pad, Button::LeftPadClick),
+            (Trackpad::Right, state.right_pad, Button::RightPadClick),
+        ] {
+            let click = button_pressed(click, state.buttons, previous_buttons);
+            if click
+                || trackpad_haptic(
+                    &mut self.trackpad_haptics[pad as usize],
+                    pad_state,
+                    state.format,
+                    timestamp_us,
+                )
+            {
+                outputs.push(Output::TrackpadHaptic { pad });
+            }
+        }
+    }
+
+    fn route_binding(
+        &mut self,
+        binding: Binding,
+        hold: Option<Button>,
+        buttons: Buttons,
+        previous_buttons: Buttons,
+        reserved: Buttons,
+        outputs: &mut Vec<Output>,
+    ) -> bool {
+        if !button_pressed(binding.input, buttons, previous_buttons)
+            || self.routes.iter().any(|route| route.input == binding.input)
+            || self.quarantined.contains(binding.input)
+            || reserved.contains(binding.input)
+        {
+            return false;
+        }
+
+        let (interrupted, held) = self.apply_action(binding.action, true, outputs);
+        if !interrupted {
+            self.routes.push(ActiveRoute {
+                input: binding.input,
+                hold,
+                held,
+            });
+        }
+        interrupted
+    }
+
     fn apply_action(
         &mut self,
         action: Action,
         active: bool,
         outputs: &mut Vec<Output>,
     ) -> (bool, Option<HeldOutput>) {
-        let held = match action {
-            Action::Key(key) => Some(HeldOutput::Key(key)),
-            Action::Mouse(button) => Some(HeldOutput::Mouse(button)),
-            Action::Gamepad(button) => Some(HeldOutput::Gamepad(button)),
-            Action::ModeSet(mode) => {
-                if active && mode != self.active_mode {
-                    self.switch_mode(mode, outputs);
-                    return (true, None);
-                }
-                None
-            }
-            Action::ModeNext => {
-                if active {
-                    let next = self.config.next_mode(self.active_mode);
-                    if next != self.active_mode {
-                        self.switch_mode(next, outputs);
-                        return (true, None);
-                    }
-                }
-                None
-            }
-        };
-        if let Some(held) = held {
-            self.set_held(held, active, outputs);
+        if let Some(held) = HeldOutput::from_action(action) {
+            set_held(&mut self.held, held, active, outputs);
+            return (false, Some(held));
         }
-        (false, held)
+        if !active {
+            return (false, None);
+        }
+        let mode = match action {
+            Action::ModeSet(mode) => mode,
+            Action::ModeNext => self.config.next_mode(self.active_mode),
+            _ => unreachable!("held actions returned above"),
+        };
+        if mode == self.active_mode {
+            return (false, None);
+        }
+        self.switch_mode(mode, outputs);
+        (true, None)
     }
 
     fn switch_mode(&mut self, mode: ModeId, outputs: &mut Vec<Output>) {
@@ -725,35 +575,17 @@ impl Mapper {
         }
         self.release_outputs(outputs);
         self.active_mode = mode;
-        self.global.fill(GlobalState::default());
-        self.axis_active = vec![false; self.mode().axes.len()];
-        self.trackpad_haptics = Default::default();
-        outputs.push(Output::ModeChanged {
-            name: self.active_mode().to_owned(),
-            haptic: self.config.mode_switch_haptic,
-        });
+        self.reset_runtime();
+        outputs.push(self.mode_changed());
     }
 
-    fn set_held(&mut self, held: HeldOutput, active: bool, outputs: &mut Vec<Output>) {
-        if active {
-            if let Some(count) = self.held.get_mut(&held) {
-                *count += 1;
-                return;
-            }
-            outputs.push(held.output(true));
-            self.held.insert(held, 1);
-            return;
-        }
-
-        let Some(count) = self.held.get_mut(&held) else {
-            return;
-        };
-        *count -= 1;
-        if *count != 0 {
-            return;
-        }
-        self.held.shift_remove(&held);
-        outputs.push(held.output(false));
+    fn reset_runtime(&mut self) {
+        self.global
+            .resize(self.config.global_bindings.len(), GlobalState::default());
+        self.global.fill(GlobalState::default());
+        self.axis_active.resize(self.mode().axes.len(), false);
+        self.axis_active.fill(false);
+        self.trackpad_haptics = Default::default();
     }
 
     fn set_gamepad_axis(&mut self, axis: GamepadAxis, value: f32, outputs: &mut Vec<Output>) {
@@ -762,6 +594,13 @@ impl Mapper {
         }
         self.gamepad_axes[axis as usize] = value;
         outputs.push(Output::GamepadAxis { axis, value });
+    }
+
+    fn mode_changed(&self) -> Output {
+        Output::ModeChanged {
+            name: self.active_mode().to_owned(),
+            haptic: self.config.mode_switch_haptic,
+        }
     }
 
     fn release_outputs(&mut self, outputs: &mut Vec<Output>) {
@@ -773,11 +612,116 @@ impl Mapper {
             outputs.push(held.output(false));
         }
         for axis in GAMEPAD_AXES {
-            if self.gamepad_axes[axis as usize] != 0.0 {
-                self.gamepad_axes[axis as usize] = 0.0;
-                outputs.push(Output::GamepadAxis { axis, value: 0.0 });
-            }
+            self.set_gamepad_axis(axis, 0.0, outputs);
         }
+    }
+}
+
+fn set_held(
+    held_outputs: &mut IndexMap<HeldOutput, usize>,
+    held: HeldOutput,
+    active: bool,
+    outputs: &mut Vec<Output>,
+) {
+    if active {
+        *held_outputs.entry(held).or_insert_with(|| {
+            outputs.push(held.output(true));
+            0
+        }) += 1;
+    } else {
+        let released = held_outputs.get_mut(&held).is_some_and(|count| {
+            *count -= 1;
+            *count == 0
+        });
+        if released {
+            held_outputs.shift_remove(&held);
+            outputs.push(held.output(false));
+        }
+    }
+}
+
+fn trigger_value(trigger: Trigger, state: &ControllerState) -> f32 {
+    match trigger {
+        Trigger::Left => state.triggers[0],
+        Trigger::Right => state.triggers[1],
+    }
+}
+
+fn scale_axis(value: f32, options: AxisOptions) -> f32 {
+    if value <= options.deadzone {
+        0.0
+    } else {
+        ((value - options.deadzone) / (1.0 - options.deadzone)).powf(options.exponent)
+            * options.sensitivity
+    }
+}
+
+fn touchpad(source: VectorSource, state: &ControllerState) -> Option<TouchpadState> {
+    match source {
+        VectorSource::LeftPad => Some(state.left_pad),
+        VectorSource::RightPad => Some(state.right_pad),
+        _ => None,
+    }
+}
+
+fn orient_vector(mut value: [f32; 2], mapping: &VectorAxisMapping) -> [f32; 2] {
+    if mapping.swap_xy {
+        value.swap(0, 1);
+    }
+    if mapping.invert_x {
+        value[0] = -value[0];
+    }
+    if mapping.invert_y {
+        value[1] = -value[1];
+    }
+    value
+}
+
+fn frame_seconds(
+    current: &ControllerState,
+    previous: Option<&ControllerState>,
+    prefer_trackpad: bool,
+) -> Option<f32> {
+    let previous = previous.filter(|previous| previous.format == current.format)?;
+    let (current_timestamp_us, previous_timestamp_us) = if prefer_trackpad {
+        match (
+            current.trackpad_timestamp_us,
+            previous.trackpad_timestamp_us,
+        ) {
+            (Some(current), Some(previous)) => (current, previous),
+            _ => (current.imu_timestamp_us, previous.imu_timestamp_us),
+        }
+    } else {
+        (current.imu_timestamp_us, previous.imu_timestamp_us)
+    };
+    let delta_us = timestamp_delta_us(current.format, current_timestamp_us, previous_timestamp_us);
+    (1..=100_000)
+        .contains(&delta_us)
+        .then_some(delta_us as f32 / 1_000_000.0)
+}
+
+fn emit_vector(
+    target: VectorTarget,
+    [x, y]: [f32; 2],
+    gamepad: &mut [f32; 6],
+    outputs: &mut Vec<Output>,
+) {
+    match target {
+        VectorTarget::GamepadLeftStick => {
+            gamepad[GamepadAxis::LeftX as usize] += x;
+            gamepad[GamepadAxis::LeftY as usize] += y;
+        }
+        VectorTarget::GamepadRightStick => {
+            gamepad[GamepadAxis::RightX as usize] += x;
+            gamepad[GamepadAxis::RightY as usize] += y;
+        }
+        VectorTarget::MouseMotion if x != 0.0 || y != 0.0 => {
+            outputs.push(Output::MouseMotion { x, y });
+        }
+        VectorTarget::Scroll if x != 0.0 || y != 0.0 => {
+            outputs.push(Output::Scroll { x, y });
+        }
+        VectorTarget::MouseMotion | VectorTarget::Scroll => {}
     }
 }
 
@@ -801,6 +745,15 @@ enum HeldOutput {
 }
 
 impl HeldOutput {
+    fn from_action(action: Action) -> Option<Self> {
+        match action {
+            Action::Key(key) => Some(Self::Key(key)),
+            Action::Mouse(button) => Some(Self::Mouse(button)),
+            Action::Gamepad(button) => Some(Self::Gamepad(button)),
+            Action::ModeSet(_) | Action::ModeNext => None,
+        }
+    }
+
     fn output(self, pressed: bool) -> Output {
         match self {
             Self::Key(key) => Output::Key { key, pressed },
@@ -817,13 +770,8 @@ struct TrackpadHapticState {
     last_tick: Option<(StateFormat, u32)>,
 }
 
-fn button_pressed(
-    button: Button,
-    current: &ControllerState,
-    previous: Option<&ControllerState>,
-) -> bool {
-    current.buttons.contains(button)
-        && !previous.is_some_and(|state| state.buttons.contains(button))
+fn button_pressed(button: Button, current: Buttons, previous: Buttons) -> bool {
+    current.contains(button) && !previous.contains(button)
 }
 
 fn trackpad_haptic(
