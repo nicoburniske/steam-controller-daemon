@@ -304,12 +304,11 @@ impl KeyboardRenderer {
                 },
             );
 
-            for (half, pointer) in pointers {
+            for (_, pointer) in pointers {
                 let Some(pointer) = pointer else {
                     continue;
                 };
-                let pressed = keyboard.pressed(half);
-                let diameter = if pressed { 38.0 } else { 35.0 };
+                let diameter = 35.0;
                 blit::paint::Rectangle::new(LogicalRect {
                     x: pointer.x - diameter / 2.0,
                     y: pointer.y - diameter / 2.0,
@@ -320,7 +319,7 @@ impl KeyboardRenderer {
                 .uniform_radius(diameter / 2.0)
                 .opacity(0.84)
                 .render(ui);
-                let center = if pressed { 27.0 } else { 24.0 };
+                let center = 24.0;
                 blit::paint::Rectangle::new(LogicalRect {
                     x: pointer.x - center / 2.0,
                     y: pointer.y - center / 2.0,
@@ -329,7 +328,6 @@ impl KeyboardRenderer {
                 })
                 .background(colors.pressed.color())
                 .uniform_radius(center / 2.0)
-                .opacity(0.72)
                 .render(ui);
             }
         });
