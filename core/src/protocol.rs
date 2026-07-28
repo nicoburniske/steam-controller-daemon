@@ -1,4 +1,4 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 pub const VALVE_VENDOR_ID: u16 = 0x28de;
 pub const PROTEUS_PRODUCT_ID: u16 = 0x1304;
@@ -35,7 +35,8 @@ pub fn trackpad_click_pressure_report(trackpad: Trackpad, pressure: u16) -> [u8;
     )
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "kebab-case")]
 pub enum Haptic {
     Rumble {
         low_frequency: u16,
@@ -158,7 +159,8 @@ pub struct TouchpadState {
     pub position: [f32; 2],
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
 #[repr(u8)]
 pub enum Trackpad {
     Left = 0,

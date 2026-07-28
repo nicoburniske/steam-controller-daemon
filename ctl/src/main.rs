@@ -1,6 +1,7 @@
 use clap::{Parser, Subcommand};
-use scd::{Client, Config, HapticSound};
-use std::{path::PathBuf, thread, time::Duration};
+use scd::protocol::Haptic;
+use scd::{Client, Config};
+use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(version, about = "Control the Steam Controller daemon")]
@@ -21,9 +22,9 @@ enum Command {
         #[command(subcommand)]
         action: Option<ModeAction>,
     },
-    Sound {
-        #[arg(value_enum)]
-        sound: Option<HapticSound>,
+    Haptic {
+        #[command(subcommand)]
+        haptic: HapticCommand,
     },
     Steam {
         #[command(subcommand)]
@@ -33,6 +34,54 @@ enum Command {
     Validate {
         #[arg(default_value = "/etc/scd/config.toml")]
         path: PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
+enum HapticCommand {
+    /// play a fixed-frequency tone
+    Tone {
+        /// frequency in hertz
+        frequency: u16,
+        /// duration in milliseconds
+        #[arg(long, default_value_t = 100)]
+        duration_ms: u16,
+        /// strength, where 0 is strongest and negative values are quieter
+        #[arg(long, default_value_t = -10, allow_hyphen_values = true)]
+        gain: i8,
+    },
+    /// sweep logarithmically between two frequencies
+    Sweep {
+        /// starting frequency in hertz
+        start_frequency: u16,
+        /// ending frequency in hertz
+        end_frequency: u16,
+        /// duration in milliseconds
+        #[arg(long, default_value_t = 120)]
+        duration_ms: u16,
+        /// strength, where 0 is strongest and negative values are quieter
+        #[arg(long, default_value_t = -10, allow_hyphen_values = true)]
+        gain: i8,
+    },
+    /// alternate the haptics on and off
+    Pulse {
+        /// active time in microseconds
+        #[arg(long, default_value_t = 625)]
+        on_us: u16,
+        /// inactive time in microseconds
+        #[arg(long, default_value_t = 625)]
+        off_us: u16,
+        /// number of pulses
+        #[arg(long, default_value_t = 48)]
+        repeat: u16,
+    },
+    /// play a built-in controller script
+    Script {
+        /// firmware script number
+        script: u8,
+        /// strength, where 0 is strongest and negative values are quieter
+        #[arg(long, default_value_t = -10, allow_hyphen_values = true)]
+        gain: i8,
     },
 }
 
@@ -81,14 +130,40 @@ fn main() -> scd::Result<()> {
         Command::Mode {
             action: Some(ModeAction::Next),
         } => client.next_mode()?,
-        Command::Sound { sound: Some(sound) } => client.play_sound(sound)?,
-        Command::Sound { sound: None } => {
-            for sound in HapticSound::ALL {
-                println!("{sound}");
-                client.play_sound(sound)?;
-                thread::sleep(Duration::from_millis(700));
+        Command::Haptic { haptic } => match haptic {
+            HapticCommand::Tone {
+                frequency,
+                duration_ms,
+                gain,
+            } => client.play_haptic(Haptic::Tone {
+                gain,
+                frequency,
+                duration_ms,
+            })?,
+            HapticCommand::Sweep {
+                start_frequency,
+                end_frequency,
+                duration_ms,
+                gain,
+            } => client.play_haptic(Haptic::LogSweep {
+                gain,
+                duration_ms,
+                start_frequency,
+                end_frequency,
+            })?,
+            HapticCommand::Pulse {
+                on_us,
+                off_us,
+                repeat,
+            } => client.play_haptic(Haptic::Pulse {
+                on_us,
+                off_us,
+                repeat,
+            })?,
+            HapticCommand::Script { script, gain } => {
+                client.play_haptic(Haptic::Script { script, gain })?
             }
-        }
+        },
         Command::Steam {
             action: SteamAction::Enable,
         } => client.set_steam(true)?,

@@ -1,4 +1,4 @@
-use crate::protocol::Button;
+use crate::protocol::{Button, Haptic};
 use crate::{Error, Result};
 use evdev::KeyCode;
 use serde::{Deserialize, Serialize};
@@ -14,26 +14,6 @@ pub struct Status {
     pub battery_percent: Option<u8>,
     pub charging: Option<bool>,
     pub device: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "kebab-case")]
-pub enum HapticSound {
-    ControllerOn,
-    ControllerOff,
-    UpFive,
-    DownFive,
-    UpSix,
-    DownSix,
-    WhoopUpThree,
-    WhoopDown,
-    Pulse,
-    ToneLow,
-    ToneHigh,
-    SweepUp,
-    SweepDown,
-    TrillUp,
-    TrillDown,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
@@ -122,8 +102,8 @@ pub enum Request {
         name: String,
     },
     ModeNext,
-    Sound {
-        sound: HapticSound,
+    Haptic {
+        haptic: Haptic,
     },
     Reload,
     Steam {
@@ -146,63 +126,6 @@ pub enum Response {
     Status { status: Status },
     Done,
     Error { message: String },
-}
-
-impl HapticSound {
-    pub const ALL: [Self; 15] = [
-        Self::ControllerOn,
-        Self::ControllerOff,
-        Self::UpFive,
-        Self::DownFive,
-        Self::UpSix,
-        Self::DownSix,
-        Self::WhoopUpThree,
-        Self::WhoopDown,
-        Self::Pulse,
-        Self::ToneLow,
-        Self::ToneHigh,
-        Self::SweepUp,
-        Self::SweepDown,
-        Self::TrillUp,
-        Self::TrillDown,
-    ];
-
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::ControllerOn => "controller-on",
-            Self::ControllerOff => "controller-off",
-            Self::UpFive => "up-five",
-            Self::DownFive => "down-five",
-            Self::UpSix => "up-six",
-            Self::DownSix => "down-six",
-            Self::WhoopUpThree => "whoop-up-three",
-            Self::WhoopDown => "whoop-down",
-            Self::Pulse => "pulse",
-            Self::ToneLow => "tone-low",
-            Self::ToneHigh => "tone-high",
-            Self::SweepUp => "sweep-up",
-            Self::SweepDown => "sweep-down",
-            Self::TrillUp => "trill-up",
-            Self::TrillDown => "trill-down",
-        }
-    }
-}
-
-impl std::fmt::Display for HapticSound {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(self.as_str())
-    }
-}
-
-impl std::str::FromStr for HapticSound {
-    type Err = String;
-
-    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
-        Self::ALL
-            .into_iter()
-            .find(|sound| sound.as_str() == value)
-            .ok_or_else(|| format!("unknown haptic sound `{value}`"))
-    }
 }
 
 impl OskState {
@@ -350,8 +273,8 @@ impl Client {
         self.request_done(Request::ModeNext)
     }
 
-    pub fn play_sound(&self, sound: HapticSound) -> Result<()> {
-        self.request_done(Request::Sound { sound })
+    pub fn play_haptic(&self, haptic: Haptic) -> Result<()> {
+        self.request_done(Request::Haptic { haptic })
     }
 
     pub fn reload(&self) -> Result<()> {

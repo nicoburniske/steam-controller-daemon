@@ -13,6 +13,7 @@ use output::Outputs;
 use scd::Result;
 use scd::config::{Config, Gamepad, is_keyboard_key};
 use scd::ipc::{OskPad, OskPadSide, OskState, Request, Response, Status};
+use scd::protocol::Haptic;
 use std::path::PathBuf;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -95,7 +96,7 @@ fn main() -> Result<()> {
                     publish_keyboard(&mapper, &mut keyboard, &mut ipc);
                     Response::Done
                 }
-                Request::Sound { sound } => match device.play_haptic(*sound) {
+                Request::Haptic { haptic } => match device.play_haptic(*haptic) {
                     Ok(()) => Response::Done,
                     Err(error) => Response::Error {
                         message: error.to_string(),
@@ -318,7 +319,11 @@ fn emit(
                 } else {
                     mapper.gamepad()
                 })?;
-                device.mode_switch_haptic()?;
+                device.play_haptic(Haptic::Tone {
+                    gain: 0,
+                    frequency: 880,
+                    duration_ms: 90,
+                })?;
             }
             Output::TrackpadHaptic { pad } => device.trackpad_haptic(pad)?,
             output => outputs.emit(&output)?,
