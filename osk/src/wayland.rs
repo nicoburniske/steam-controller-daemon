@@ -43,11 +43,6 @@ pub fn run(socket: PathBuf, font: Box<[u8]>, theme: Theme, width: u32, height: u
     let compositor = CompositorState::bind(&globals, &qh)?;
     let shell = LayerShell::bind(&globals, &qh)?;
     let shm = Shm::bind(&globals, &qh)?;
-    let surface = compositor.create_surface(&qh);
-    let layer = shell.create_layer_surface(&qh, surface, Layer::Overlay, Some("scd-osk"), None);
-    let input_region = compositor.wl_compositor().create_region(&qh, ());
-    layer.set_input_region(Some(&input_region));
-    input_region.destroy();
 
     let (input_sender, input) = channel::channel();
     thread::Builder::new().name("scd-osk-input".into()).spawn({
@@ -105,9 +100,11 @@ pub fn run(socket: PathBuf, font: Box<[u8]>, theme: Theme, width: u32, height: u
     let mut state = State {
         registry: RegistryState::new(&globals),
         outputs: OutputState::new(&globals, &qh),
+        compositor,
+        shell,
         shm,
         qh,
-        layer,
+        layer: None,
         pool,
         buffer: None,
         renderer: KeyboardRenderer::new(font, theme, width, height, 1)?,
@@ -139,9 +136,11 @@ pub fn run(socket: PathBuf, font: Box<[u8]>, theme: Theme, width: u32, height: u
 struct State {
     registry: RegistryState,
     outputs: OutputState,
+    compositor: CompositorState,
+    shell: LayerShell,
     shm: Shm,
     qh: QueueHandle<Self>,
-    layer: LayerSurface,
+    layer: Option<LayerSurface>,
     pool: SlotPool,
     buffer: Option<Buffer>,
     renderer: KeyboardRenderer,
@@ -170,6 +169,12 @@ impl State {
             (true, false) => {
                 self.hide();
             }
+            (true, true) if self.layer.is_none() => {
+                if let Err(error) = self.show() {
+                    log::error!("could not restore keyboard: {error}");
+                    self.exit = true;
+                }
+            }
             (true, true) if changed => {
                 self.redraw_pending = true;
                 if let Err(error) = self.redraw() {
@@ -190,13 +195,30 @@ impl State {
     }
 
     fn show(&mut self) -> Result<()> {
-        self.layer.set_layer(Layer::Overlay);
-        self.layer.set_anchor(Anchor::BOTTOM);
-        self.layer.set_size(self.width, self.height);
-        self.layer.set_exclusive_zone(0);
-        self.layer
-            .set_keyboard_interactivity(KeyboardInteractivity::None);
-        if self.layer.set_buffer_scale(self.scale).is_err() {
+        if self.layer.is_none() {
+            if self.outputs.outputs().next().is_none() {
+                return Ok(());
+            }
+            let surface = self.compositor.create_surface(&self.qh);
+            let layer = self.shell.create_layer_surface(
+                &self.qh,
+                surface,
+                Layer::Overlay,
+                Some("scd-osk"),
+                None,
+            );
+            let input_region = self.compositor.wl_compositor().create_region(&self.qh, ());
+            layer.set_input_region(Some(&input_region));
+            input_region.destroy();
+            self.layer = Some(layer);
+        }
+        let layer = self.layer.as_ref().expect("layer surface exists");
+        layer.set_layer(Layer::Overlay);
+        layer.set_anchor(Anchor::BOTTOM);
+        layer.set_size(self.width, self.height);
+        layer.set_exclusive_zone(0);
+        layer.set_keyboard_interactivity(KeyboardInteractivity::None);
+        if layer.set_buffer_scale(self.scale).is_err() {
             return Err(scd::Error::message(
                 "Wayland surface does not support buffer scaling",
             ));
@@ -204,13 +226,15 @@ impl State {
         self.configured = false;
         self.frame_pending = false;
         self.redraw_pending = true;
-        self.layer.commit();
+        layer.commit();
         Ok(())
     }
 
     fn hide(&mut self) {
-        self.layer.wl_surface().attach(None, 0, 0);
-        self.layer.commit();
+        if let Some(layer) = &self.layer {
+            layer.wl_surface().attach(None, 0, 0);
+            layer.commit();
+        }
         self.configured = false;
         self.frame_pending = false;
         self.redraw_pending = false;
@@ -224,6 +248,9 @@ impl State {
         {
             return Ok(());
         }
+        let Some(layer) = &self.layer else {
+            return Ok(());
+        };
         self.renderer.render(&self.keyboard);
         let [width, height] = self.renderer.physical_size();
         let stride = width as i32 * 4;
@@ -267,14 +294,14 @@ impl State {
             target.copy_from_slice(&pixel.raw().to_le_bytes());
         }
 
-        self.layer
+        layer
             .wl_surface()
             .damage_buffer(0, 0, width as i32, height as i32);
-        self.layer
+        layer
             .wl_surface()
-            .frame(&self.qh, FrameCallbackData(self.layer.wl_surface().clone()));
-        buffer.attach_to(self.layer.wl_surface())?;
-        self.layer.commit();
+            .frame(&self.qh, FrameCallbackData(layer.wl_surface().clone()));
+        buffer.attach_to(layer.wl_surface())?;
+        layer.commit();
         self.frame_pending = true;
         self.redraw_pending = self.renderer.animation_pending();
         Ok(())
@@ -289,13 +316,16 @@ impl CompositorHandler for State {
         surface: &wl_surface::WlSurface,
         factor: i32,
     ) {
-        if surface != self.layer.wl_surface() || factor <= 0 || factor as u32 == self.scale {
+        let Some(layer) = &self.layer else {
+            return;
+        };
+        if surface != layer.wl_surface() || factor <= 0 || factor as u32 == self.scale {
             return;
         }
         self.scale = factor as u32;
         self.buffer = None;
         self.redraw_pending = true;
-        let result = if self.layer.set_buffer_scale(self.scale).is_err() {
+        let result = if layer.set_buffer_scale(self.scale).is_err() {
             Err(scd::Error::message(
                 "Wayland surface does not support buffer scaling",
             ))
@@ -326,7 +356,10 @@ impl CompositorHandler for State {
         surface: &wl_surface::WlSurface,
         _: u32,
     ) {
-        if surface != self.layer.wl_surface() {
+        let Some(layer) = &self.layer else {
+            return;
+        };
+        if surface != layer.wl_surface() {
             return;
         }
         self.frame_pending = false;
@@ -357,7 +390,11 @@ impl CompositorHandler for State {
 
 impl LayerShellHandler for State {
     fn closed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &LayerSurface) {
-        self.exit = true;
+        self.layer = None;
+        self.buffer = None;
+        self.configured = false;
+        self.frame_pending = false;
+        self.redraw_pending = self.keyboard.visible();
     }
 
     fn configure(
@@ -404,7 +441,15 @@ impl OutputHandler for State {
         &mut self.outputs
     }
 
-    fn new_output(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {}
+    fn new_output(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {
+        if self.keyboard.visible()
+            && self.layer.is_none()
+            && let Err(error) = self.show()
+        {
+            log::error!("could not restore keyboard: {error}");
+            self.exit = true;
+        }
+    }
 
     fn update_output(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {}
 
