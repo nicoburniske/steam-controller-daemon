@@ -56,6 +56,7 @@ pub enum Haptic {
         frequency: u16,
         duration_ms: u16,
     },
+    #[serde(rename = "sweep")]
     LogSweep {
         gain: i8,
         duration_ms: u16,

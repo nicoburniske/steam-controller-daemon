@@ -7,7 +7,7 @@ use scd::{
         Action, AnalogSource, AnalogTarget, AxisActivation, AxisComponent, AxisMapping, Config,
         Curve, Gamepad, GamepadButton, MouseButton,
     },
-    protocol::{Button, Buttons, ControllerState, StateFormat, TouchpadState, Trackpad},
+    protocol::{Button, Buttons, ControllerState, Haptic, StateFormat, TouchpadState, Trackpad},
 };
 
 const TRACKPAD_HAPTIC_MIN_TRAVEL: f32 = 45.0 / 32767.0;
@@ -70,6 +70,7 @@ pub enum Output {
     KeyboardToggle,
     ModeChanged {
         name: String,
+        haptic: Option<Haptic>,
     },
 }
 
@@ -466,6 +467,7 @@ impl Mapper {
         self.trackpad_haptics = Default::default();
         outputs.push(Output::ModeChanged {
             name: self.active_mode().to_owned(),
+            haptic: self.config.mode_switch_haptic,
         });
     }
 
@@ -571,6 +573,7 @@ impl Mapper {
         self.trackpad_haptics = Default::default();
         outputs.push(Output::ModeChanged {
             name: self.active_mode().to_owned(),
+            haptic: self.config.mode_switch_haptic,
         });
     }
 
@@ -1362,7 +1365,8 @@ mod tests {
                     pressed: false
                 },
                 Output::ModeChanged {
-                    name: "two".to_owned()
+                    name: "two".to_owned(),
+                    haptic: None,
                 }
             ]
         );

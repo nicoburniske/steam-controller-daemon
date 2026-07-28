@@ -6,7 +6,7 @@ use serde::{Deserialize, Deserializer};
 
 use crate::{
     Error, Result as ScdResult,
-    protocol::{Button, Buttons},
+    protocol::{Button, Buttons, Haptic},
 };
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -14,6 +14,8 @@ use crate::{
 pub struct Config {
     pub version: u32,
     pub default_mode: String,
+    #[serde(default)]
+    pub mode_switch_haptic: Option<Haptic>,
     #[serde(default)]
     pub trackpads: Trackpads,
     #[serde(default)]

@@ -13,7 +13,6 @@ use output::Outputs;
 use scd::Result;
 use scd::config::{Config, Gamepad, is_keyboard_key};
 use scd::ipc::{OskPad, OskPadSide, OskState, Request, Response, Status};
-use scd::protocol::Haptic;
 use std::path::PathBuf;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -312,18 +311,16 @@ fn emit(
     }
     for output in mapped.drain(..) {
         match output {
-            Output::ModeChanged { name } => {
+            Output::ModeChanged { name, haptic } => {
                 log::info!("active mode: {name}");
                 outputs.set_gamepad(if device.steam_enabled() {
                     Gamepad::None
                 } else {
                     mapper.gamepad()
                 })?;
-                device.play_haptic(Haptic::Tone {
-                    gain: 0,
-                    frequency: 880,
-                    duration_ms: 90,
-                })?;
+                if let Some(haptic) = haptic {
+                    device.play_haptic(haptic)?;
+                }
             }
             Output::TrackpadHaptic { pad } => device.trackpad_haptic(pad)?,
             output => outputs.emit(&output)?,
