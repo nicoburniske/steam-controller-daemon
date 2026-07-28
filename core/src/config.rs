@@ -334,9 +334,19 @@ pub struct GlobalBinding {
     pub action: Action,
 }
 
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum Gamepad {
+    #[default]
+    None,
+    Xbox,
+}
+
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Mode {
+    #[serde(default)]
+    pub gamepad: Gamepad,
     #[serde(default)]
     pub bindings: Vec<Binding>,
     #[serde(default)]
@@ -573,6 +583,7 @@ mod tests {
                 action = { type = "keyboard-toggle" }
 
                 [modes.desktop]
+                gamepad = "none"
                 [[modes.desktop.bindings]]
                 input = "l4"
                 action = { type = "key", key = "super" }
@@ -584,6 +595,7 @@ mod tests {
                 action = { type = "key", key = "q" }
 
                 [modes."anything at all"]
+                gamepad = "xbox"
             "#,
         )
         .unwrap();
@@ -597,6 +609,8 @@ mod tests {
             KeyCode::KEY_LEFTSHIFT
         );
         assert_eq!(config.global.bindings[0].chord, [Button::Steam, Button::X]);
+        assert_eq!(config.modes["desktop"].gamepad, Gamepad::None);
+        assert_eq!(config.modes["anything at all"].gamepad, Gamepad::Xbox);
         assert_eq!(
             config.modes["desktop"].bindings[0].action,
             Action::Key {

@@ -11,7 +11,7 @@ use ipc::Server;
 use mapper::{Mapper, Output};
 use output::Outputs;
 use scd::Result;
-use scd::config::{Config, is_keyboard_key};
+use scd::config::{Config, Gamepad, is_keyboard_key};
 use scd::ipc::{OskPad, OskPadSide, OskState, Request, Response, Status};
 use std::path::PathBuf;
 use std::thread;
@@ -36,7 +36,12 @@ fn main() -> Result<()> {
     let mut device = DeviceManager::new(config.trackpads.click_pressure)?;
     let mut mapper = Mapper::new(config);
     let mut mapped = Vec::new();
-    let mut outputs = Outputs::new(!device.steam_enabled())?;
+    let gamepad = if device.steam_enabled() {
+        Gamepad::None
+    } else {
+        mapper.gamepad()
+    };
+    let mut outputs = Outputs::new(gamepad)?;
     let (mut ipc, commands) = Server::bind(socket)?;
     let mut keyboard = OskState::default();
     keyboard.set_bindings(mapper.osk_bindings());
@@ -131,11 +136,19 @@ fn main() -> Result<()> {
                             keyboard_closed_at = None;
                             publish_keyboard(&mapper, &mut keyboard, &mut ipc);
                         }
-                        outputs.set_gamepad(!*enabled)?;
+                        outputs.set_gamepad(if *enabled {
+                            Gamepad::None
+                        } else {
+                            mapper.gamepad()
+                        })?;
                         Response::Done
                     }
                     Err(error) => {
-                        outputs.set_gamepad(!device.steam_enabled())?;
+                        outputs.set_gamepad(if device.steam_enabled() {
+                            Gamepad::None
+                        } else {
+                            mapper.gamepad()
+                        })?;
                         Response::Error {
                             message: error.to_string(),
                         }
@@ -236,7 +249,7 @@ fn main() -> Result<()> {
                     charging = Some(is_charging);
                 }
                 DeviceEvent::Disconnected => {
-                    outputs.set_gamepad(true)?;
+                    outputs.set_gamepad(mapper.gamepad())?;
                     mapper.release_all(&mut mapped);
                     emit(
                         &mut mapped,
@@ -300,6 +313,11 @@ fn emit(
         match output {
             Output::ModeChanged { name } => {
                 log::info!("active mode: {name}");
+                outputs.set_gamepad(if device.steam_enabled() {
+                    Gamepad::None
+                } else {
+                    mapper.gamepad()
+                })?;
                 device.mode_switch_haptic()?;
             }
             Output::TrackpadHaptic { pad } => device.trackpad_haptic(pad)?,

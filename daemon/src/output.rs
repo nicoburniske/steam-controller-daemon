@@ -6,11 +6,12 @@ use evdev::{
 use std::os::fd::AsRawFd;
 
 use crate::mapper::{GamepadAxis, Output};
-use scd::config::{GamepadButton, MouseButton, is_keyboard_key};
+use scd::config::{Gamepad, GamepadButton, MouseButton, is_keyboard_key};
 use scd::{Error, Result};
 
 pub struct Outputs {
     gamepad: Option<VirtualDevice>,
+    gamepad_type: Gamepad,
     gamepad_dpad: [bool; 4],
     keyboard: VirtualDevice,
     left_shift_held: bool,
@@ -29,7 +30,7 @@ struct RumbleEffects {
 }
 
 impl Outputs {
-    pub fn new(gamepad: bool) -> Result<Self> {
+    pub fn new(gamepad: Gamepad) -> Result<Self> {
         let mut keyboard_keys = AttributeSet::<KeyCode>::new();
         for code in 1..=0x2ff {
             let key = KeyCode::new(code);
@@ -66,8 +67,9 @@ impl Outputs {
             .with_relative_axes(&mouse_axes)?
             .build()?;
 
-        Ok(Self {
-            gamepad: gamepad.then(Self::create_gamepad).transpose()?,
+        let mut outputs = Self {
+            gamepad: None,
+            gamepad_type: Gamepad::None,
             gamepad_dpad: [false; 4],
             keyboard,
             left_shift_held: false,
@@ -76,20 +78,26 @@ impl Outputs {
             mouse_remainder: [0.0; 2],
             scroll_remainder: [0.0; 2],
             rumble: RumbleEffects::default(),
-        })
+        };
+        outputs.set_gamepad(gamepad)?;
+        Ok(outputs)
     }
 
-    pub fn set_gamepad(&mut self, enabled: bool) -> Result<()> {
-        if enabled == self.gamepad.is_some() {
+    pub fn set_gamepad(&mut self, gamepad: Gamepad) -> Result<()> {
+        if gamepad == self.gamepad_type {
             return Ok(());
         }
-        self.rumble = RumbleEffects::default();
-        self.gamepad_dpad = [false; 4];
-        self.gamepad = if enabled {
-            Some(Self::create_gamepad()?)
-        } else {
-            None
+        let device = match gamepad {
+            Gamepad::None => None,
+            Gamepad::Xbox => Some(Self::create_xbox()?),
         };
+        self.rumble = RumbleEffects {
+            last_output: self.rumble.last_output,
+            ..RumbleEffects::default()
+        };
+        self.gamepad_dpad = [false; 4];
+        self.gamepad = device;
+        self.gamepad_type = gamepad;
         Ok(())
     }
 
@@ -249,7 +257,11 @@ impl Outputs {
 
     pub fn poll_rumble(&mut self) -> Result<Option<(u16, u16)>> {
         let Some(gamepad) = &mut self.gamepad else {
-            return Ok(None);
+            if self.rumble.last_output == (0, 0) {
+                return Ok(None);
+            }
+            self.rumble.last_output = (0, 0);
+            return Ok(Some((0, 0)));
         };
         let events = match gamepad.fetch_events() {
             Ok(events) => events.collect::<Vec<_>>(),
@@ -289,7 +301,7 @@ impl Outputs {
         Ok(self.rumble.changed_output())
     }
 
-    fn create_gamepad() -> Result<VirtualDevice> {
+    fn create_xbox() -> Result<VirtualDevice> {
         let gamepad_keys = AttributeSet::from_iter([
             KeyCode::BTN_SOUTH,
             KeyCode::BTN_EAST,

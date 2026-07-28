@@ -5,7 +5,7 @@ use scd::{
     Error, Result,
     config::{
         Action, AnalogSource, AnalogTarget, AxisActivation, AxisComponent, AxisMapping, Config,
-        Curve, GamepadButton, MouseButton,
+        Curve, Gamepad, GamepadButton, MouseButton,
     },
     protocol::{Button, Buttons, ControllerState, StateFormat, TouchpadState, Trackpad},
 };
@@ -113,6 +113,10 @@ impl Mapper {
             .get_index(self.active_mode)
             .expect("active mode index is valid")
             .0
+    }
+
+    pub fn gamepad(&self) -> Gamepad {
+        self.mode().gamepad
     }
 
     pub fn process(
@@ -1268,6 +1272,7 @@ mod tests {
                 version = 1
                 default_mode = "one"
                 [modes.one]
+                gamepad = "xbox"
                 [[modes.one.bindings]]
                 input = "l4"
                 action = { type = "key", key = "super" }
@@ -1284,10 +1289,12 @@ mod tests {
                 input = "y"
                 action = { type = "gamepad", button = "south" }
                 [modes.two]
+                gamepad = "none"
             "#,
         )
         .unwrap();
         let mut mapper = Mapper::new(config);
+        assert_eq!(mapper.gamepad(), Gamepad::Xbox);
         assert_eq!(
             mapped(
                 &mut mapper,
@@ -1359,6 +1366,7 @@ mod tests {
                 }
             ]
         );
+        assert_eq!(mapper.gamepad(), Gamepad::None);
     }
 
     #[test]
