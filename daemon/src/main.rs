@@ -1,4 +1,5 @@
 mod device;
+mod gamepad;
 mod ipc;
 mod mapper;
 mod output;
@@ -215,6 +216,7 @@ fn main() -> Result<()> {
                 DeviceEvent::State(state) => {
                     let was_visible = keyboard.visible;
                     mapper.process(&state, keyboard.visible, &mut mapped);
+                    outputs.update_gamepad_source(&state, mapper.gamepad_touchpad());
                     emit(
                         &mut mapped,
                         &mut mapper,
@@ -252,8 +254,10 @@ fn main() -> Result<()> {
                 } => {
                     battery = Some(percent);
                     charging = Some(is_charging);
+                    outputs.set_gamepad_battery(percent);
                 }
                 DeviceEvent::Disconnected => {
+                    outputs.set_gamepad(Gamepad::None)?;
                     outputs.set_gamepad(mapper.gamepad())?;
                     mapper.release_all(&mut mapped);
                     emit(
@@ -331,7 +335,7 @@ fn emit(
             output => outputs.emit(&output)?,
         }
     }
-    Ok(())
+    outputs.sync_gamepad()
 }
 
 fn sync_keyboard(mapper: &Mapper, keyboard: &mut OskState) {

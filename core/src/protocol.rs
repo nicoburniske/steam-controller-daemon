@@ -150,6 +150,8 @@ pub struct ControllerState {
     pub right_pad: TouchpadState,
     pub trackpad_timestamp_us: Option<u32>,
     pub imu_timestamp_us: u32,
+    pub accel: [i16; 3],
+    pub gyro_raw: [i16; 3],
     pub gyro: [f32; 3],
 }
 
@@ -305,6 +307,16 @@ fn parse_state(report: &[u8], format: StateFormat) -> Option<ControllerState> {
         } else {
             (18, None, le_u32(report, 30))
         };
+    let accel = [
+        le_i16(report, 34),
+        le_i16(report, 38),
+        le_i16(report, 36).saturating_neg(),
+    ];
+    let gyro_raw = [
+        le_i16(report, 40),
+        le_i16(report, 44),
+        le_i16(report, 42).saturating_neg(),
+    ];
     let gyro_scale = 2000.0 * (std::f32::consts::PI / 180.0) / 32768.0;
 
     Some(ControllerState {
@@ -340,11 +352,9 @@ fn parse_state(report: &[u8], format: StateFormat) -> Option<ControllerState> {
         },
         trackpad_timestamp_us,
         imu_timestamp_us,
-        gyro: [
-            f32::from(le_i16(report, 40)) * gyro_scale,
-            f32::from(le_i16(report, 44)) * gyro_scale,
-            -f32::from(le_i16(report, 42)) * gyro_scale,
-        ],
+        accel,
+        gyro_raw,
+        gyro: gyro_raw.map(|value| f32::from(value) * gyro_scale),
     })
 }
 
@@ -408,6 +418,8 @@ mod tests {
         assert!((state.left_stick[0] - 222.0 / 32767.0).abs() < f32::EPSILON);
         assert!((state.left_stick[1] + 336.0 / 32767.0).abs() < f32::EPSILON);
         assert_eq!(state.imu_timestamp_us, 566_874);
+        assert_eq!(state.accel, [831, 6670, -14567]);
+        assert_eq!(state.gyro_raw, [-430, -903, -275]);
     }
 
     #[test]

@@ -113,6 +113,10 @@ impl Mapper {
         self.mode().gamepad
     }
 
+    pub fn gamepad_touchpad(&self) -> Option<Trackpad> {
+        self.mode().gamepad_touchpad
+    }
+
     pub fn process(
         &mut self,
         state: &ControllerState,

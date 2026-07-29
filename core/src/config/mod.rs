@@ -446,6 +446,7 @@ impl TryFrom<raw::Config> for Config {
                 .collect();
             modes.push(Mode {
                 gamepad: mode.gamepad,
+                gamepad_touchpad: mode.gamepad_touchpad,
                 bindings,
                 axes,
                 layers,
@@ -489,6 +490,7 @@ pub struct ModeId(usize);
 #[derive(Debug, Clone, PartialEq)]
 pub struct Mode {
     pub gamepad: Gamepad,
+    pub gamepad_touchpad: Option<Trackpad>,
     pub bindings: Vec<Binding>,
     pub axes: Vec<AxisMapping>,
     pub layers: Vec<Layer>,
@@ -534,6 +536,8 @@ pub enum Gamepad {
     #[default]
     None,
     Xbox,
+    #[serde(rename = "dualshock4")]
+    DualShock4,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -790,7 +794,8 @@ mod tests {
                 action = { type = "key", key = "q" }
 
                 [mode."anything at all"]
-                gamepad = "xbox"
+                gamepad = "dualshock4"
+                gamepad_touchpad = "right"
             "#,
         )
         .unwrap();
@@ -811,6 +816,7 @@ mod tests {
         );
         assert_eq!(config.global_bindings[0].trigger, Button::X);
         assert_eq!(mode.gamepad, Gamepad::None);
+        assert_eq!(mode.gamepad_touchpad, None);
         assert_eq!(mode.bindings[0].action, Action::Key(KeyCode::KEY_LEFTMETA));
         assert_eq!(mode.bindings[1].action, Action::ModeSet(other));
         assert_eq!(
@@ -827,7 +833,8 @@ mod tests {
         };
         assert_eq!(components, [AxisComponent::Y, AxisComponent::X]);
         assert_eq!(options.axis.exponent, 2.0);
-        assert_eq!(config.mode(other).gamepad, Gamepad::Xbox);
+        assert_eq!(config.mode(other).gamepad, Gamepad::DualShock4);
+        assert_eq!(config.mode(other).gamepad_touchpad, Some(Trackpad::Right));
     }
 
     #[test]

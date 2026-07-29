@@ -6,6 +6,8 @@
 }: let
   cfg = config.services.scd;
   udevRules = pkgs.writeTextDir "lib/udev/rules.d/72-scd.rules" ''
+    KERNEL=="uhid", OWNER:="root", GROUP:="scd", MODE:="0660"
+    SUBSYSTEM=="hidraw", KERNEL=="hidraw*", KERNELS=="0003:054C:0BA0.*", TAG+="uaccess", GROUP:="input", MODE:="0660"
     SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="28de", ATTR{idProduct}=="1304", TAG-="uaccess", OWNER:="scd", GROUP:="scd-control", MODE:="0600"
     TEST!="/run/scd/steam-device", SUBSYSTEM=="hidraw", KERNEL=="hidraw*", ATTRS{idVendor}=="28de", ATTRS{idProduct}=="1304", TAG-="uaccess", OWNER:="root", GROUP:="scd", MODE:="0660"
     TEST!="/run/scd/steam-device", SUBSYSTEM=="tty", ATTRS{idVendor}=="28de", ATTRS{idProduct}=="1304", TAG-="uaccess", OWNER:="root", GROUP:="root", MODE:="0000"
@@ -42,6 +44,7 @@ in {
   config = lib.mkIf cfg.enable {
     environment.etc."scd/config.toml".source = cfg.configFile;
     environment.systemPackages = [cfg.package];
+    boot.kernelModules = ["uhid"];
     hardware.uinput.enable = true;
     services.udev.packages = [udevRules];
     users = {

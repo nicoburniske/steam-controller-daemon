@@ -79,6 +79,8 @@ pub struct Mode {
     #[serde(default)]
     pub gamepad: Gamepad,
     #[serde(default)]
+    pub gamepad_touchpad: Option<crate::protocol::Trackpad>,
+    #[serde(default)]
     pub bind: Vec<Binding>,
     #[serde(default)]
     pub axis: Vec<AxisMapping>,
