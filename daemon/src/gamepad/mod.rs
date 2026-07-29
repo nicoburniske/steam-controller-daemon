@@ -3,7 +3,6 @@ mod xbox;
 
 use scd::Result;
 use scd::config::{Gamepad, GamepadButton};
-use scd::protocol::{ControllerState, Trackpad};
 
 use crate::mapper::GamepadAxis;
 
@@ -41,19 +40,6 @@ impl VirtualGamepad {
                 gamepad.emit_axis(axis, value);
                 Ok(())
             }
-        }
-    }
-
-    pub fn update_source(&mut self, state: &ControllerState, touchpad: Option<Trackpad>) {
-        if let Self::DualShock4(gamepad) = self {
-            gamepad.update_source(state, touchpad);
-        }
-    }
-
-    pub fn sync(&mut self) -> Result<()> {
-        match self {
-            Self::Xbox(_) => Ok(()),
-            Self::DualShock4(gamepad) => gamepad.sync(),
         }
     }
 

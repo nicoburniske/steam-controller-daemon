@@ -175,7 +175,7 @@ impl Outputs {
     }
 
     pub fn update_gamepad_source(&mut self, state: &ControllerState, touchpad: Option<Trackpad>) {
-        if let Some(gamepad) = &mut self.gamepad {
+        if let Some(VirtualGamepad::DualShock4(gamepad)) = &mut self.gamepad {
             gamepad.update_source(state, touchpad);
         }
     }
@@ -187,7 +187,10 @@ impl Outputs {
     }
 
     pub fn sync_gamepad(&mut self) -> Result<()> {
-        self.gamepad.as_mut().map_or(Ok(()), VirtualGamepad::sync)
+        match &mut self.gamepad {
+            Some(VirtualGamepad::DualShock4(gamepad)) => gamepad.sync(),
+            _ => Ok(()),
+        }
     }
 
     fn emit_relative(
