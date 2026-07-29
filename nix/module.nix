@@ -13,40 +13,46 @@
     TEST!="/run/scd/steam-device", SUBSYSTEM=="tty", ATTRS{idVendor}=="28de", ATTRS{idProduct}=="1304", TAG-="uaccess", OWNER:="root", GROUP:="root", MODE:="0000"
     TEST!="/run/scd/steam-device", SUBSYSTEM=="input", ATTRS{id/vendor}=="28de", ATTRS{id/product}=="1304", TAG-="uaccess", OWNER:="root", GROUP:="root", MODE:="0000", ENV{LIBINPUT_IGNORE_DEVICE}="1"
   '';
+  # uaccess runs at 73, so clear any stale puck ACL afterward
+  aclRules = pkgs.writeTextDir "lib/udev/rules.d/74-scd.rules" ''
+    ACTION!="remove", TEST!="/run/scd/steam-device", SUBSYSTEM=="hidraw", KERNEL=="hidraw*", ATTRS{idVendor}=="28de", ATTRS{idProduct}=="1304", RUN{program}+="${lib.getExe' pkgs.acl "setfacl"} --remove-all /dev/%k"
+  '';
 in {
   options.services.scd = {
     enable = lib.mkEnableOption "the Steam Controller userspace daemon";
-
     configFile = lib.mkOption {
       type = lib.types.path;
       description = "Static TOML configuration for the daemon.";
     };
-
     package = lib.mkOption {
       type = lib.types.package;
       default = pkgs.callPackage ./package.nix {};
       description = "The scd package to use.";
     };
-
-    osk.enable = lib.mkOption {
-      type = lib.types.bool;
-      default = true;
-      description = "Whether to run the on-screen keyboard in the graphical session.";
-    };
-
-    osk.font = lib.mkOption {
-      type = lib.types.nullOr lib.types.path;
-      default = "${pkgs.jetbrains-mono}/share/fonts/truetype/JetBrainsMono[wght].ttf";
-      description = "Font file passed to the on-screen keyboard, or null to use its configuration.";
+    osk = {
+      enable = lib.mkOption {
+        type = lib.types.bool;
+        default = true;
+        description = "Whether to run the on-screen keyboard in the graphical session.";
+      };
+      font = lib.mkOption {
+        type = lib.types.nullOr lib.types.path;
+        default = "${pkgs.jetbrains-mono}/share/fonts/truetype/JetBrainsMono[wght].ttf";
+        description = "Font file passed to the on-screen keyboard, or null to use its configuration.";
+      };
     };
   };
-
   config = lib.mkIf cfg.enable {
-    environment.etc."scd/config.toml".source = cfg.configFile;
-    environment.systemPackages = [cfg.package];
+    environment = {
+      etc."scd/config.toml".source = cfg.configFile;
+      systemPackages = [cfg.package];
+    };
     boot.kernelModules = ["uhid"];
     hardware.uinput.enable = true;
-    services.udev.packages = [udevRules];
+    services.udev.packages = [
+      udevRules
+      aclRules
+    ];
     users = {
       groups = {
         scd = {};
