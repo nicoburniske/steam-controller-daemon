@@ -3,7 +3,7 @@ use indexmap::IndexMap;
 use serde::{Deserialize, Deserializer};
 
 use super::{AxisComponent, Gamepad, GamepadButton, MouseButton, deserialize_key};
-use crate::protocol::{Button, Haptic};
+use crate::protocol::{Button, Buttons, Haptic};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -63,14 +63,7 @@ impl<'de> Deserialize<'de> for OskKey {
 #[serde(deny_unknown_fields)]
 pub struct Global {
     #[serde(default)]
-    pub bind: Vec<GlobalBinding>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct GlobalBinding {
-    pub chord: Vec<Button>,
-    pub action: Action,
+    pub bind: Vec<Binding>,
 }
 
 #[derive(Default, Deserialize)]
@@ -97,10 +90,42 @@ pub struct Layer {
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Binding {
-    pub input: Button,
+    pub input: BindingInput,
+    #[serde(flatten)]
     pub action: Action,
+}
+
+#[derive(Deserialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum BindingInput {
+    Button(Button),
+    Chord(Vec<Button>),
+}
+
+impl BindingInput {
+    pub fn buttons(&self) -> &[Button] {
+        match self {
+            Self::Button(button) => std::slice::from_ref(button),
+            Self::Chord(buttons) => buttons,
+        }
+    }
+
+    pub fn into_parts(self) -> Option<(Buttons, Button)> {
+        let (mut inputs, trigger) = match self {
+            Self::Button(trigger) => (Buttons::default(), trigger),
+            Self::Chord(mut buttons) => {
+                let trigger = buttons.pop()?;
+                let mut inputs = Buttons::default();
+                for button in buttons {
+                    inputs.insert(button);
+                }
+                (inputs, trigger)
+            }
+        };
+        inputs.insert(trigger);
+        Some((inputs, trigger))
+    }
 }
 
 #[derive(Deserialize)]

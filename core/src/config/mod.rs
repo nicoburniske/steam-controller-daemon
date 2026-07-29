@@ -102,26 +102,7 @@ impl TryFrom<raw::Config> for Config {
             }
         }
 
-        for (index, binding) in global.bind.iter().enumerate() {
-            if binding.chord.is_empty() {
-                errors.push(format!("global binding {index} chord must not be empty"));
-            }
-            for (position, button) in binding.chord.iter().enumerate() {
-                if binding.chord[..position].contains(button) {
-                    errors.push(format!(
-                        "global binding {index} chord contains duplicate button {button:?}"
-                    ));
-                }
-            }
-            if global.bind[..index]
-                .iter()
-                .any(|earlier| earlier.chord == binding.chord)
-            {
-                errors.push(format!(
-                    "global binding {index} duplicates an earlier chord"
-                ));
-            }
-        }
+        validate_binding_inputs(&global.bind, format_args!("global"), &mut errors);
 
         let osk_bindings = osk
             .bind
@@ -133,10 +114,9 @@ impl TryFrom<raw::Config> for Config {
             .into_iter()
             .filter_map(|binding| {
                 let action = convert_global_action(binding.action, &mode_names, &mut errors)?;
-                let mut chord = binding.chord;
-                let trigger = chord.pop()?;
+                let (inputs, trigger) = binding.input.into_parts()?;
                 Some(GlobalBinding {
-                    prerequisites: chord.into_boxed_slice(),
+                    inputs,
                     trigger,
                     action,
                 })
@@ -145,15 +125,12 @@ impl TryFrom<raw::Config> for Config {
 
         let mut modes = Vec::with_capacity(raw_modes.len());
         for (name, mode) in raw_modes {
+            validate_binding_inputs(&mode.bind, format_args!("mode {name:?}"), &mut errors);
             let mut mode_inputs = Buttons::default();
-            for (index, binding) in mode.bind.iter().enumerate() {
-                if mode_inputs.contains(binding.input) {
-                    errors.push(format!(
-                        "mode {name:?} binding {index} duplicates input {:?}",
-                        binding.input
-                    ));
+            for binding in &mode.bind {
+                for input in binding.input.buttons() {
+                    mode_inputs.insert(*input);
                 }
-                mode_inputs.insert(binding.input);
             }
 
             let mut layer_holds = Buttons::default();
@@ -173,20 +150,17 @@ impl TryFrom<raw::Config> for Config {
                     ));
                 }
 
-                let mut layer_inputs = Buttons::default();
+                validate_binding_inputs(
+                    &layer.bind,
+                    format_args!("mode {name:?} layer {layer_name:?}"),
+                    &mut errors,
+                );
                 for (binding_index, binding) in layer.bind.iter().enumerate() {
-                    if binding.input == layer.hold {
+                    if binding.input.buttons().contains(&layer.hold) {
                         errors.push(format!(
                             "mode {name:?} layer {layer_name:?} binding {binding_index} must not use its hold button"
                         ));
                     }
-                    if layer_inputs.contains(binding.input) {
-                        errors.push(format!(
-                            "mode {name:?} layer {layer_name:?} binding {binding_index} duplicates input {:?}",
-                            binding.input
-                        ));
-                    }
-                    layer_inputs.insert(binding.input);
                 }
             }
 
@@ -212,8 +186,11 @@ impl TryFrom<raw::Config> for Config {
                 .bind
                 .into_iter()
                 .filter_map(|binding| {
-                    convert_action(binding.action, &mode_names, &mut errors).map(|action| Binding {
-                        input: binding.input,
+                    let action = convert_action(binding.action, &mode_names, &mut errors)?;
+                    let (inputs, trigger) = binding.input.into_parts()?;
+                    Some(Binding {
+                        inputs,
+                        trigger,
                         action,
                     })
                 })
@@ -227,11 +204,12 @@ impl TryFrom<raw::Config> for Config {
                         .bind
                         .into_iter()
                         .filter_map(|binding| {
-                            convert_action(binding.action, &mode_names, &mut errors).map(|action| {
-                                Binding {
-                                    input: binding.input,
-                                    action,
-                                }
+                            let action = convert_action(binding.action, &mode_names, &mut errors)?;
+                            let (inputs, trigger) = binding.input.into_parts()?;
+                            Some(Binding {
+                                inputs,
+                                trigger,
+                                action,
                             })
                         })
                         .collect(),
@@ -504,13 +482,14 @@ pub struct Layer {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Binding {
-    pub input: Button,
+    pub inputs: Buttons,
+    pub trigger: Button,
     pub action: Action,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GlobalBinding {
-    pub prerequisites: Box<[Button]>,
+    pub inputs: Buttons,
     pub trigger: Button,
     pub action: GlobalAction,
 }
@@ -666,6 +645,40 @@ pub enum GamepadButton {
     PaddleRightLower,
 }
 
+fn validate_binding_inputs(
+    bindings: &[raw::Binding],
+    context: fmt::Arguments<'_>,
+    errors: &mut Vec<String>,
+) {
+    for (index, binding) in bindings.iter().enumerate() {
+        let buttons = binding.input.buttons();
+        if matches!(binding.input, raw::BindingInput::Chord(_)) && buttons.len() < 2 {
+            errors.push(format!(
+                "{context} binding {index} list input must contain at least two buttons"
+            ));
+        }
+        for (position, button) in buttons.iter().enumerate() {
+            if buttons[..position].contains(button) {
+                errors.push(format!(
+                    "{context} binding {index} input contains duplicate button {button:?}"
+                ));
+            }
+        }
+        if bindings[..index].iter().any(|earlier| {
+            let earlier = earlier.input.buttons();
+            earlier.len() == buttons.len()
+                && earlier.last() == buttons.last()
+                && earlier[..earlier.len().saturating_sub(1)]
+                    .iter()
+                    .all(|button| buttons[..buttons.len().saturating_sub(1)].contains(button))
+        }) {
+            errors.push(format!(
+                "{context} binding {index} duplicates an earlier input"
+            ));
+        }
+    }
+}
+
 fn convert_global_action(
     action: raw::Action,
     mode_names: &IndexMap<String, ModeId>,
@@ -770,18 +783,17 @@ mod tests {
                 l4 = "super"
                 left-trigger-click = "shift"
 
-                [[global.bind]]
-                chord = ["steam", "x"]
-                action = { type = "keyboard-toggle" }
+                [global]
+                bind = [
+                    { input = ["steam", "x"], type = "keyboard-toggle" },
+                ]
 
                 [mode.desktop]
                 gamepad = "none"
-                [[mode.desktop.bind]]
-                input = "l4"
-                action = { type = "key", key = "super" }
-                [[mode.desktop.bind]]
-                input = "x"
-                action = { type = "mode-set", name = "anything at all" }
+                bind = [
+                    { input = "l4", type = "key", key = "super" },
+                    { input = "x", type = "mode-set", name = "anything at all" },
+                ]
                 [[mode.desktop.axis]]
                 source = "gyro"
                 target = "mouse-motion"
@@ -789,9 +801,9 @@ mod tests {
 
                 [mode.desktop.layer.apps]
                 hold = "left-bumper"
-                [[mode.desktop.layer.apps.bind]]
-                input = "b"
-                action = { type = "key", key = "q" }
+                bind = [
+                    { input = "b", type = "key", key = "q" },
+                ]
 
                 [mode."anything at all"]
                 gamepad = "dualshock4"
@@ -811,8 +823,8 @@ mod tests {
             KeyCode::KEY_LEFTSHIFT
         );
         assert_eq!(
-            config.global_bindings[0].prerequisites.as_ref(),
-            [Button::Steam]
+            config.global_bindings[0].inputs,
+            Buttons::from_bits(Button::Steam.mask() | Button::X.mask())
         );
         assert_eq!(config.global_bindings[0].trigger, Button::X);
         assert_eq!(mode.gamepad, Gamepad::None);
@@ -904,14 +916,15 @@ mod tests {
                 [osk.bind]
                 left-pad-click = "enter"
 
-                [[global.bind]]
-                chord = []
-                action = { type = "mode-set", name = "also missing" }
+                [global]
+                bind = [
+                    { input = [], type = "mode-set", name = "also missing" },
+                ]
 
                 [mode.one]
-                [[mode.one.bind]]
-                input = "a"
-                action = { type = "keyboard-toggle" }
+                bind = [
+                    { input = "a", type = "keyboard-toggle" },
+                ]
             "#,
         )
         .unwrap_err();
@@ -923,7 +936,7 @@ mod tests {
             "does not name a configured mode",
             "click_pressure must be in [0, 100]",
             "reserved for keyboard pointing",
-            "chord must not be empty",
+            "list input must contain at least two buttons",
             "mode-set target \"also missing\" is not configured",
             "keyboard-toggle is only valid for global bindings",
         ] {
@@ -939,12 +952,23 @@ mod tests {
         for (body, expected) in [
             (
                 r#"
-                    [[global.bind]]
-                    chord = ["steam", "steam"]
-                    action = { type = "mode-next" }
+                    [global]
+                    bind = [
+                        { input = ["steam", "steam"], type = "mode-next" },
+                    ]
                     [mode.one]
                 "#,
                 "duplicate button",
+            ),
+            (
+                r#"
+                    [global]
+                    bind = [
+                        { input = ["steam"], type = "mode-next" },
+                    ]
+                    [mode.one]
+                "#,
+                "list input must contain at least two buttons",
             ),
             (
                 r#"
@@ -957,9 +981,9 @@ mod tests {
             (
                 r#"
                     [mode.one]
-                    [[mode.one.bind]]
-                    input = "left-bumper"
-                    action = { type = "key", key = "q" }
+                    bind = [
+                        { input = "left-bumper", type = "key", key = "q" },
+                    ]
                     [mode.one.layer.apps]
                     hold = "left-bumper"
                 "#,
@@ -968,20 +992,49 @@ mod tests {
             (
                 r#"
                     [mode.one]
-                    [[mode.one.bind]]
-                    input = "a"
-                    action = { type = "mode-set", name = "missing" }
+                    bind = [
+                        { input = "a", type = "mode-set", name = "missing" },
+                    ]
                 "#,
                 "mode-set target",
             ),
             (
                 r#"
                     [mode.one]
-                    [[mode.one.bind]]
-                    input = "a"
-                    action = { type = "keyboard-toggle" }
+                    bind = [
+                        { input = "a", type = "keyboard-toggle" },
+                    ]
                 "#,
                 "only valid for global bindings",
+            ),
+            (
+                r#"
+                    [mode.one]
+                    bind = [
+                        { input = "a", type = "key", key = "q" },
+                        { input = "a", type = "key", key = "w" },
+                    ]
+                "#,
+                "duplicates an earlier input",
+            ),
+            (
+                r#"
+                    [mode.one]
+                    bind = [
+                        { input = ["steam", "left-bumper", "x"], type = "key", key = "q" },
+                        { input = ["left-bumper", "steam", "x"], type = "key", key = "w" },
+                    ]
+                "#,
+                "duplicates an earlier input",
+            ),
+            (
+                r#"
+                    [mode.one]
+                    bind = [
+                        { input = "a", type = "key", key = "q", typo = true },
+                    ]
+                "#,
+                "unknown field",
             ),
         ] {
             let source = format!("version = 1\ndefault_mode = \"one\"\n{body}");
@@ -1046,9 +1099,9 @@ mod tests {
                     version = 1
                     default_mode = "one"
                     [mode.one]
-                    [[mode.one.bind]]
-                    input = "a"
-                    action = {{ type = "key", key = "{code}" }}
+                    bind = [
+                        {{ input = "a", type = "key", key = "{code}" }},
+                    ]
                 "#
             );
             assert!(

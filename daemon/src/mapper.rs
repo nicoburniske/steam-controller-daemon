@@ -126,7 +126,7 @@ impl Mapper {
         let previous = self.previous.replace(*state);
         let previous_buttons = previous.map_or(Buttons::default(), |state| state.buttons);
 
-        // global chords
+        // global bindings
         let mut reserved = Buttons::default();
         let mut captured = Buttons::default();
         for index in 0..self.config.global_bindings.len() {
@@ -134,17 +134,13 @@ impl Mapper {
             let runtime = &mut self.global[index];
             let was_active = runtime.active;
             let trigger = binding.trigger;
-            let all_active = state.buttons.contains(trigger)
-                && binding
-                    .prerequisites
-                    .iter()
-                    .all(|button| state.buttons.contains(*button));
+            let mut prerequisites = binding.inputs;
+            prerequisites.remove(trigger);
+            let all_active =
+                state.buttons.contains(trigger) && state.buttons.contains_all(prerequisites);
             let pressed = all_active
                 && !previous_buttons.contains(trigger)
-                && binding
-                    .prerequisites
-                    .iter()
-                    .all(|button| previous_buttons.contains(*button));
+                && previous_buttons.contains_all(prerequisites);
             let active = if was_active { all_active } else { pressed };
             runtime.active = active;
             if pressed {
@@ -153,18 +149,18 @@ impl Mapper {
                 runtime.captured = false;
             }
 
-            for button in binding
-                .prerequisites
-                .iter()
-                .copied()
-                .chain([binding.trigger])
-            {
+            for button in Button::ALL {
+                if !binding.inputs.contains(button) {
+                    continue;
+                }
                 if runtime.captured {
                     captured.insert(button);
-                } else if !state.buttons.contains(button) {
-                    break;
+                    reserved.insert(button);
+                } else if (prerequisites.contains(button) && state.buttons.contains(button))
+                    || (button == trigger && all_active)
+                {
+                    reserved.insert(button);
                 }
-                reserved.insert(button);
             }
 
             let action = binding.action;
@@ -212,17 +208,20 @@ impl Mapper {
         while index != 0 {
             index -= 1;
             let route = &self.routes[index];
-            let released = !state.buttons.contains(route.input);
+            let released = !state.buttons.contains_all(route.inputs);
             let hold_lost = route
                 .hold
                 .is_some_and(|hold| !state.buttons.contains(hold) || reserved.contains(hold));
-            if !released && !hold_lost && !captured.contains(route.input) {
+            let captured = Button::ALL
+                .iter()
+                .any(|button| route.inputs.contains(*button) && captured.contains(*button));
+            if !released && !hold_lost && !captured {
                 continue;
             }
 
             let route = self.routes.remove(index);
-            if state.buttons.contains(route.input) {
-                self.quarantined.insert(route.input);
+            if state.buttons.contains(route.trigger) {
+                self.quarantined.insert(route.trigger);
             }
             if let Some(held) = route.held {
                 set_held(&mut self.held, held, false, outputs);
@@ -234,49 +233,76 @@ impl Mapper {
         for layer in &self.mode().layers {
             if state.buttons.contains(layer.hold) && !reserved.contains(layer.hold) {
                 for binding in &layer.bindings {
-                    overridden.insert(binding.input);
+                    overridden.insert(binding.trigger);
                 }
             }
         }
 
-        // base bindings
-        let binding_count = self.mode().bindings.len();
-        for index in 0..binding_count {
-            let binding = self.mode().bindings[index];
-            if overridden.contains(binding.input) {
+        let mut chord_reserved = reserved;
+        for binding in &self.mode().bindings {
+            if !overridden.contains(binding.trigger) {
+                reserve_chord_inputs(*binding, state.buttons, &mut chord_reserved);
+            }
+        }
+        for layer in &self.mode().layers {
+            if !state.buttons.contains(layer.hold) || reserved.contains(layer.hold) {
                 continue;
             }
-            if self.route_binding(
-                binding,
-                None,
-                state.buttons,
-                previous_buttons,
-                reserved,
-                outputs,
-            ) {
-                return;
+            for binding in &layer.bindings {
+                reserve_chord_inputs(*binding, state.buttons, &mut chord_reserved);
             }
         }
 
-        // layer bindings
+        let binding_count = self.mode().bindings.len();
         let layer_count = self.mode().layers.len();
-        for layer_index in 0..layer_count {
-            let hold = self.mode().layers[layer_index].hold;
-            if !state.buttons.contains(hold) || reserved.contains(hold) {
-                continue;
-            }
-            let binding_count = self.mode().layers[layer_index].bindings.len();
-            for binding_index in 0..binding_count {
-                let binding = self.mode().layers[layer_index].bindings[binding_index];
+        // chords consume buttons before scalar bindings
+        for chord in [true, false] {
+            let unavailable = if chord { reserved } else { chord_reserved };
+
+            for index in 0..binding_count {
+                let binding = self.mode().bindings[index];
+                let mut prerequisites = binding.inputs;
+                prerequisites.remove(binding.trigger);
+                if (prerequisites != Buttons::default()) != chord
+                    || overridden.contains(binding.trigger)
+                {
+                    continue;
+                }
                 if self.route_binding(
                     binding,
-                    Some(hold),
+                    None,
                     state.buttons,
                     previous_buttons,
-                    reserved,
+                    unavailable,
                     outputs,
                 ) {
                     return;
+                }
+            }
+
+            for layer_index in 0..layer_count {
+                let hold = self.mode().layers[layer_index].hold;
+                if !state.buttons.contains(hold) || reserved.contains(hold) {
+                    continue;
+                }
+                let binding_count = self.mode().layers[layer_index].bindings.len();
+                for binding_index in 0..binding_count {
+                    let binding = self.mode().layers[layer_index].bindings[binding_index];
+                    let mut prerequisites = binding.inputs;
+                    prerequisites.remove(binding.trigger);
+                    if (prerequisites != Buttons::default()) != chord {
+                        continue;
+                    }
+                    if self.route_binding(
+                        binding,
+                        Some(hold),
+                        state.buttons,
+                        previous_buttons,
+                        unavailable,
+                        outputs,
+                    ) {
+                        return;
+                    }
                 }
             }
         }
@@ -600,10 +626,20 @@ impl Mapper {
         reserved: Buttons,
         outputs: &mut Vec<Output>,
     ) -> bool {
-        if !button_pressed(binding.input, buttons, previous_buttons)
-            || self.routes.iter().any(|route| route.input == binding.input)
-            || self.quarantined.contains(binding.input)
-            || reserved.contains(binding.input)
+        let mut prerequisites = binding.inputs;
+        prerequisites.remove(binding.trigger);
+        let unavailable = Button::ALL
+            .iter()
+            .any(|button| binding.inputs.contains(*button) && reserved.contains(*button));
+        if !button_pressed(binding.trigger, buttons, previous_buttons)
+            || !buttons.contains_all(binding.inputs)
+            || !previous_buttons.contains_all(prerequisites)
+            || self
+                .routes
+                .iter()
+                .any(|route| route.trigger == binding.trigger)
+            || self.quarantined.contains(binding.trigger)
+            || unavailable
         {
             return false;
         }
@@ -611,7 +647,8 @@ impl Mapper {
         let (interrupted, held) = self.apply_action(binding.action, true, outputs);
         if !interrupted {
             self.routes.push(ActiveRoute {
-                input: binding.input,
+                inputs: binding.inputs,
+                trigger: binding.trigger,
                 hold,
                 held,
             });
@@ -768,7 +805,8 @@ struct GlobalState {
 }
 
 struct ActiveRoute {
-    input: Button,
+    inputs: Buttons,
+    trigger: Button,
     hold: Option<Button>,
     held: Option<HeldOutput>,
 }
@@ -804,6 +842,22 @@ struct TrackpadHapticState {
     previous_position: Option<[f32; 2]>,
     progress: f32,
     last_tick: Option<(StateFormat, u32)>,
+}
+
+fn reserve_chord_inputs(binding: Binding, buttons: Buttons, reserved: &mut Buttons) {
+    let mut prerequisites = binding.inputs;
+    prerequisites.remove(binding.trigger);
+    if prerequisites == Buttons::default() {
+        return;
+    }
+    for button in Button::ALL {
+        if prerequisites.contains(button) && buttons.contains(button) {
+            reserved.insert(button);
+        }
+    }
+    if buttons.contains_all(prerequisites) && buttons.contains(binding.trigger) {
+        reserved.insert(binding.trigger);
+    }
 }
 
 fn button_pressed(button: Button, current: Buttons, previous: Buttons) -> bool {
@@ -881,21 +935,20 @@ mod tests {
             r#"
                 version = 1
                 default_mode = "desktop"
-                [[global.bind]]
-                chord = ["steam", "x"]
-                action = { type = "keyboard-toggle" }
+                [global]
+                bind = [
+                    { input = ["steam", "x"], type = "keyboard-toggle" },
+                ]
                 [mode.desktop]
-                [[mode.desktop.bind]]
-                input = "steam"
-                action = { type = "key", key = "super" }
-                [[mode.desktop.bind]]
-                input = "x"
-                action = { type = "key", key = "x" }
+                bind = [
+                    { input = "steam", type = "key", key = "super" },
+                    { input = "x", type = "key", key = "x" },
+                ]
                 [mode.desktop.layer.apps]
                 hold = "left-bumper"
-                [[mode.desktop.layer.apps.bind]]
-                input = "x"
-                action = { type = "key", key = "t" }
+                bind = [
+                    { input = "x", type = "key", key = "t" },
+                ]
             "#,
         )
         .unwrap();
@@ -933,6 +986,47 @@ mod tests {
     }
 
     #[test]
+    fn mode_chord_consumes_fallback_and_releases_with_its_prerequisite() {
+        let config = Config::parse(
+            r#"
+                version = 1
+                default_mode = "desktop"
+                [mode.desktop]
+                bind = [
+                    { input = ["left-bumper", "x"], type = "key", key = "q" },
+                    { input = "x", type = "key", key = "x" },
+                ]
+            "#,
+        )
+        .unwrap();
+        let mut mapper = Mapper::new(config);
+
+        assert_eq!(mapped(&mut mapper, &state_with(&[Button::Lb])), []);
+        assert_eq!(
+            mapped(&mut mapper, &state_with(&[Button::Lb, Button::X])),
+            [Output::Key {
+                key: KeyCode::KEY_Q,
+                pressed: true,
+            }]
+        );
+        assert_eq!(
+            mapped(&mut mapper, &state_with(&[Button::X])),
+            [Output::Key {
+                key: KeyCode::KEY_Q,
+                pressed: false,
+            }]
+        );
+        assert_eq!(mapped(&mut mapper, &ControllerState::default()), []);
+        assert_eq!(
+            mapped(&mut mapper, &state_with(&[Button::X])),
+            [Output::Key {
+                key: KeyCode::KEY_X,
+                pressed: true,
+            }]
+        );
+    }
+
+    #[test]
     fn keyboard_capture_suppresses_mode_outputs_without_repressing_held_controls() {
         let config = Config::parse(
             r#"
@@ -941,13 +1035,14 @@ mod tests {
                 [osk.bind]
                 x = "backspace"
                 y = "space"
-                [[global.bind]]
-                chord = ["steam", "x"]
-                action = { type = "keyboard-toggle" }
+                [global]
+                bind = [
+                    { input = ["steam", "x"], type = "keyboard-toggle" },
+                ]
                 [mode.desktop]
-                [[mode.desktop.bind]]
-                input = "a"
-                action = { type = "key", key = "enter" }
+                bind = [
+                    { input = "a", type = "key", key = "enter" },
+                ]
                 [[mode.desktop.axis]]
                 source = "right-pad"
                 target = "mouse-motion"
@@ -1086,20 +1181,16 @@ mod tests {
                 version = 1
                 default_mode = "desktop"
                 [mode.desktop]
-                [[mode.desktop.bind]]
-                input = "l4"
-                action = { type = "key", key = "super" }
-                [[mode.desktop.bind]]
-                input = "a"
-                action = { type = "key", key = "enter" }
-                [[mode.desktop.bind]]
-                input = "b"
-                action = { type = "key", key = "escape" }
+                bind = [
+                    { input = "l4", type = "key", key = "super" },
+                    { input = "a", type = "key", key = "enter" },
+                    { input = "b", type = "key", key = "escape" },
+                ]
                 [mode.desktop.layer.apps]
                 hold = "left-bumper"
-                [[mode.desktop.layer.apps.bind]]
-                input = "b"
-                action = { type = "key", key = "q" }
+                bind = [
+                    { input = "b", type = "key", key = "q" },
+                ]
             "#,
         )
         .unwrap();
@@ -1139,19 +1230,19 @@ mod tests {
                 version = 1
                 default_mode = "desktop"
                 [mode.desktop]
-                [[mode.desktop.bind]]
-                input = "b"
-                action = { type = "key", key = "escape" }
+                bind = [
+                    { input = "b", type = "key", key = "escape" },
+                ]
                 [mode.desktop.layer.apps]
                 hold = "left-bumper"
-                [[mode.desktop.layer.apps.bind]]
-                input = "b"
-                action = { type = "key", key = "q" }
+                bind = [
+                    { input = "b", type = "key", key = "q" },
+                ]
                 [mode.desktop.layer.navigation]
                 hold = "right-bumper"
-                [[mode.desktop.layer.navigation.bind]]
-                input = "b"
-                action = { type = "key", key = "o" }
+                bind = [
+                    { input = "b", type = "key", key = "o" },
+                ]
             "#,
         )
         .unwrap();
@@ -1213,21 +1304,13 @@ mod tests {
                 default_mode = "one"
                 [mode.one]
                 gamepad = "xbox"
-                [[mode.one.bind]]
-                input = "l4"
-                action = { type = "key", key = "super" }
-                [[mode.one.bind]]
-                input = "a"
-                action = { type = "key", key = "enter" }
-                [[mode.one.bind]]
-                input = "b"
-                action = { type = "key", key = "enter" }
-                [[mode.one.bind]]
-                input = "x"
-                action = { type = "mouse", button = "left" }
-                [[mode.one.bind]]
-                input = "y"
-                action = { type = "gamepad", button = "south" }
+                bind = [
+                    { input = "l4", type = "key", key = "super" },
+                    { input = "a", type = "key", key = "enter" },
+                    { input = "b", type = "key", key = "enter" },
+                    { input = "x", type = "mouse", button = "left" },
+                    { input = "y", type = "gamepad", button = "south" },
+                ]
                 [mode.two]
                 gamepad = "none"
             "#,
