@@ -15,7 +15,7 @@ pub struct Config {
     pub click_pressure: u16,
     pub osk_bindings: IndexMap<Button, KeyCode>,
     pub global_bindings: Vec<GlobalBinding>,
-    mode_names: IndexMap<String, ModeId>,
+    pub mode_names: IndexMap<String, ModeId>,
     pub modes: Vec<Mode>,
 }
 
@@ -485,7 +485,7 @@ impl fmt::Display for ConfigError {
 impl error::Error for ConfigError {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ModeId(usize);
+pub struct ModeId(pub usize);
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Mode {

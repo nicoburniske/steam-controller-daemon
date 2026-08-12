@@ -14,7 +14,6 @@ use output::Outputs;
 use scd::Result;
 use scd::config::{Config, Gamepad, is_keyboard_key};
 use scd::ipc::{OskPad, OskPadSide, OskState, Request, Response, Status};
-use std::fs;
 use std::path::PathBuf;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -22,21 +21,15 @@ use std::time::{Duration, Instant};
 #[derive(Parser)]
 #[command(version, about = "Steam Controller userspace daemon")]
 struct Args {
-    #[arg(long, default_value = "/etc/scd/config.toml")]
-    config: PathBuf,
     #[arg(long, default_value = "/run/scd/control.sock")]
     socket: PathBuf,
 }
 
 fn main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
-    let Args {
-        config: config_path,
-        socket,
-    } = Args::parse();
-    let config = Config::parse(&fs::read_to_string(&config_path)?)?;
-    let mut device = DeviceManager::new(config.click_pressure)?;
-    let mut mapper = Mapper::new(config);
+    let Args { socket } = Args::parse();
+    let mut device = DeviceManager::new()?;
+    let mut mapper = Mapper::empty();
     let mut mapped = Vec::new();
     let gamepad = if device.steam_enabled() {
         Gamepad::None
@@ -103,29 +96,25 @@ fn main() -> Result<()> {
                         message: error.to_string(),
                     },
                 },
-                Request::Reload => {
-                    let source = fs::read_to_string(&config_path)?;
-                    let config = Config::parse(&source);
-                    match config {
-                        Ok(config) => {
-                            device.set_trackpad_click_pressure(config.click_pressure)?;
-                            mapper.reload(config, &mut mapped);
-                            keyboard.set_bindings(mapper.osk_bindings());
-                            emit(
-                                &mut mapped,
-                                &mut mapper,
-                                &mut outputs,
-                                &device,
-                                &mut keyboard,
-                            )?;
-                            publish_keyboard(&mapper, &mut keyboard, &mut ipc);
-                            Response::Done
-                        }
-                        Err(error) => Response::Error {
-                            message: error.to_string(),
-                        },
+                Request::ConfigApply { source } => match Config::parse(source) {
+                    Ok(config) => {
+                        device.set_trackpad_click_pressure(config.click_pressure)?;
+                        mapper.reload(config, &mut mapped);
+                        keyboard.set_bindings(mapper.osk_bindings());
+                        emit(
+                            &mut mapped,
+                            &mut mapper,
+                            &mut outputs,
+                            &device,
+                            &mut keyboard,
+                        )?;
+                        publish_keyboard(&mapper, &mut keyboard, &mut ipc);
+                        Response::Done
                     }
-                }
+                    Err(error) => Response::Error {
+                        message: error.to_string(),
+                    },
+                },
                 Request::Steam { enabled } => match device.set_steam(*enabled) {
                     Ok(()) => {
                         if *enabled {

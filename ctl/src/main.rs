@@ -31,11 +31,16 @@ enum Command {
         #[command(subcommand)]
         action: SteamAction,
     },
-    Reload,
-    Validate {
-        #[arg(default_value = "/etc/scd/config.toml")]
-        path: PathBuf,
+    Config {
+        #[command(subcommand)]
+        action: ConfigAction,
     },
+}
+
+#[derive(Subcommand)]
+enum ConfigAction {
+    Apply { path: PathBuf },
+    Validate { path: PathBuf },
 }
 
 #[derive(Subcommand)]
@@ -171,8 +176,12 @@ fn main() -> scd::Result<()> {
         Command::Steam {
             action: SteamAction::Disable,
         } => client.set_steam(false)?,
-        Command::Reload => client.reload()?,
-        Command::Validate { path } => {
+        Command::Config {
+            action: ConfigAction::Apply { path },
+        } => client.apply_config(fs::read_to_string(path)?)?,
+        Command::Config {
+            action: ConfigAction::Validate { path },
+        } => {
             Config::parse(&fs::read_to_string(path)?)?;
             println!("configuration is valid");
         }

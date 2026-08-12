@@ -34,14 +34,14 @@ struct Slot {
 }
 
 impl DeviceManager {
-    pub fn new(trackpad_click_pressure: u16) -> Result<Self> {
+    pub fn new() -> Result<Self> {
         let api = HidApi::new()?;
         let steam = SteamDevice::recover()?;
         let mut manager = Self {
             api,
             slots: Vec::new(),
             active: None,
-            trackpad_click_pressure,
+            trackpad_click_pressure: 25,
             last_state: None,
             last_scan: Instant::now() - Duration::from_secs(2),
             steam,

@@ -17,6 +17,8 @@ use std::rc::Rc;
 use std::sync::mpsc::{self, TrySendError};
 use std::thread;
 
+const MAX_REQUEST_SIZE: usize = 1024 * 1024;
+
 pub struct Server {
     path: PathBuf,
     osk: watch::WatchSender<OskState>,
@@ -259,7 +261,7 @@ fn accept_clients<'a>(
 
 impl ClientReader {
     fn ready(&mut self, stream: &UnixStream, state: &mut IpcState) -> PostAction {
-        let remaining = 64 * 1024 + 1 - self.request.len();
+        let remaining = MAX_REQUEST_SIZE + 1 - self.request.len();
         match BufReader::new(stream)
             .take(remaining as u64)
             .read_line(&mut self.request)
@@ -267,7 +269,7 @@ impl ClientReader {
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => PostAction::Continue,
             Err(_) => self.reject(stream, state, "invalid request"),
             Ok(0) => self.close(state),
-            Ok(_) if self.request.len() > 64 * 1024 => {
+            Ok(_) if self.request.len() > MAX_REQUEST_SIZE => {
                 self.reject(stream, state, "request is too large")
             }
             Ok(_) if !self.request.ends_with('\n') => self.close(state),

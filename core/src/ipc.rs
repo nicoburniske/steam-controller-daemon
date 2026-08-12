@@ -107,7 +107,9 @@ pub enum Request {
     Haptic {
         haptic: Haptic,
     },
-    Reload,
+    ConfigApply {
+        source: String,
+    },
     Steam {
         enabled: bool,
     },
@@ -296,8 +298,8 @@ impl Client {
         self.request_done(Request::Haptic { haptic })
     }
 
-    pub fn reload(&self) -> Result<()> {
-        self.request_done(Request::Reload)
+    pub fn apply_config(&self, source: String) -> Result<()> {
+        self.request_done(Request::ConfigApply { source })
     }
 
     pub fn set_steam(&self, enabled: bool) -> Result<()> {
