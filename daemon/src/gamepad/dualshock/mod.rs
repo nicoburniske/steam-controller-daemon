@@ -1,4 +1,16 @@
 //! wired DualShock 4 v2 presented through local USB/IP and `vhci_hcd`
+//!
+//! previous approaches:
+//!
+//! - USB-tagged UHID exposed the Sony identity but no USB parent, so Wine saw a
+//!   zero device version and games' native PlayStation input paths rejected it
+//! - a configfs gadget worked, but required privileged construction, UDC
+//!   binding, and `/dev/hidg` management
+//! - Bluetooth-tagged UHID was visible to Steam but did not work reliably
+//!   through the tested Wine/Proton game paths
+//!
+//! the fixed USB/IP backend keeps the working kernel-enumerated approach while
+//! presenting a wired DS4 through local `vhci_hcd` attachment
 
 mod usbip;
 

@@ -1,4 +1,7 @@
-//! minimal Linux usbfs interrupt transport
+//! minimal Linux usbfs transport for the physical controller receiver
+//!
+//! direct interface ownership avoids HIDAPI's hidraw permissions and keeps
+//! interrupt reads queued while the daemon processes input and haptic output.
 
 use linux_raw_sys::ioctl::{
     USBDEVFS_CLEAR_HALT, USBDEVFS_CONNECT, USBDEVFS_CONTROL, USBDEVFS_DISCARDURB,

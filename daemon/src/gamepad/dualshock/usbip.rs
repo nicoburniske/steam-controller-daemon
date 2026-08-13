@@ -1,4 +1,6 @@
 //! fixed local USB/IP transport for the wired DualShock 4
+//!
+//! a local socket pair connects the fixed device backend to `vhci_hcd`
 
 use std::fs;
 use std::io::{self, Read, Write};
