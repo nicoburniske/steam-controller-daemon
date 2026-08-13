@@ -1,3 +1,16 @@
+//! DualShock 4 emulation using the Linux USB gadget subsystem.
+//!
+//! UHID does not expose a USB device revision through Wine, so native DS4
+//! games reject an otherwise valid HID device. configfs instead presents a
+//! complete Sony USB device through `dummy_hcd`.
+//!
+//! service setup runs as root and creates the gadget without binding it. the
+//! daemon owns only its `UDC` attribute and `/dev/hidg0`. entering DS4 mode
+//! binds the gadget to `dummy_udc`, causing USB enumeration; leaving the mode
+//! unbinds it. service shutdown also unbinds it in case normal destruction did
+//! not run. feature reports use the HID gadget control-request ioctls because
+//! the adapter has no interrupt output endpoint.
+
 use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
