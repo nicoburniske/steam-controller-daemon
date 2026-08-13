@@ -3,7 +3,6 @@ mod gamepad;
 mod ipc;
 mod mapper;
 mod output;
-mod steam;
 
 use clap::Parser;
 use device::{DeviceEvent, DeviceManager};
@@ -14,29 +13,36 @@ use output::Outputs;
 use scd::Result;
 use scd::config::{Config, Gamepad, is_keyboard_key};
 use scd::ipc::{OskPad, OskPadSide, OskState, Request, Response, Status};
+use std::fs;
 use std::path::PathBuf;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::thread;
 use std::time::{Duration, Instant};
 
 #[derive(Parser)]
 #[command(version, about = "Steam Controller userspace daemon")]
 struct Args {
+    #[arg(long)]
+    config: PathBuf,
     #[arg(long, default_value = "/run/scd/control.sock")]
     socket: PathBuf,
 }
 
 fn main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
-    let Args { socket } = Args::parse();
+    let Args { config, socket } = Args::parse();
+    let config = Config::parse(&fs::read_to_string(config)?)?;
+    let terminated = Arc::new(AtomicBool::new(false));
+    signal_hook::flag::register(signal_hook::consts::SIGTERM, terminated.clone())?;
+    signal_hook::flag::register(signal_hook::consts::SIGINT, terminated.clone())?;
     let mut device = DeviceManager::new()?;
-    let mut mapper = Mapper::empty();
+    device.set_trackpad_click_pressure(config.click_pressure);
+    let mut mapper = Mapper::new(config);
     let mut mapped = Vec::new();
-    let gamepad = if device.steam_enabled() {
-        Gamepad::None
-    } else {
-        mapper.gamepad()
-    };
-    let mut outputs = Outputs::new(gamepad)?;
+    let mut outputs = Outputs::new(mapper.gamepad())?;
     let (mut ipc, commands) = Server::bind(socket)?;
     let mut keyboard = OskState::default();
     keyboard.set_bindings(mapper.osk_bindings());
@@ -49,13 +55,12 @@ fn main() -> Result<()> {
     let mut last_rumble = Instant::now();
 
     log::info!("active mode: {}", mapper.active_mode());
-    loop {
-        for command in commands.try_iter() {
+    while !terminated.load(Ordering::Relaxed) {
+        for command in commands.try_iter().take(32) {
             let response = match &command.request {
                 Request::Status => Response::Status {
                     status: Status {
                         connected: device.connected(),
-                        steam: device.steam_enabled(),
                         mode: mapper.active_mode().to_owned(),
                         battery_percent: battery,
                         charging,
@@ -68,7 +73,7 @@ fn main() -> Result<()> {
                             &mut mapped,
                             &mut mapper,
                             &mut outputs,
-                            &device,
+                            &mut device,
                             &mut keyboard,
                         )?;
                         publish_keyboard(&mapper, &mut keyboard, &mut ipc);
@@ -84,28 +89,26 @@ fn main() -> Result<()> {
                         &mut mapped,
                         &mut mapper,
                         &mut outputs,
-                        &device,
+                        &mut device,
                         &mut keyboard,
                     )?;
                     publish_keyboard(&mapper, &mut keyboard, &mut ipc);
                     Response::Done
                 }
-                Request::Haptic { haptic } => match device.play_haptic(*haptic) {
-                    Ok(()) => Response::Done,
-                    Err(error) => Response::Error {
-                        message: error.to_string(),
-                    },
-                },
+                Request::Haptic { haptic } => {
+                    device.play_haptic(*haptic);
+                    Response::Done
+                }
                 Request::ConfigApply { source } => match Config::parse(source) {
                     Ok(config) => {
-                        device.set_trackpad_click_pressure(config.click_pressure)?;
+                        device.set_trackpad_click_pressure(config.click_pressure);
                         mapper.reload(config, &mut mapped);
                         keyboard.set_bindings(mapper.osk_bindings());
                         emit(
                             &mut mapped,
                             &mut mapper,
                             &mut outputs,
-                            &device,
+                            &mut device,
                             &mut keyboard,
                         )?;
                         publish_keyboard(&mapper, &mut keyboard, &mut ipc);
@@ -114,40 +117,6 @@ fn main() -> Result<()> {
                     Err(error) => Response::Error {
                         message: error.to_string(),
                     },
-                },
-                Request::Steam { enabled } => match device.set_steam(*enabled) {
-                    Ok(()) => {
-                        if *enabled {
-                            rumble = (0, 0);
-                            mapper.release_all(&mut mapped);
-                            emit(
-                                &mut mapped,
-                                &mut mapper,
-                                &mut outputs,
-                                &device,
-                                &mut keyboard,
-                            )?;
-                            keyboard.set_visible(false);
-                            keyboard_closed_at = None;
-                            publish_keyboard(&mapper, &mut keyboard, &mut ipc);
-                        }
-                        outputs.set_gamepad(if *enabled {
-                            Gamepad::None
-                        } else {
-                            mapper.gamepad()
-                        })?;
-                        Response::Done
-                    }
-                    Err(error) => {
-                        outputs.set_gamepad(if device.steam_enabled() {
-                            Gamepad::None
-                        } else {
-                            mapper.gamepad()
-                        })?;
-                        Response::Error {
-                            message: error.to_string(),
-                        }
-                    }
                 },
                 Request::OskHide { session } => {
                     if *session == 0 || *session != keyboard.session() || !keyboard.visible {
@@ -160,7 +129,7 @@ fn main() -> Result<()> {
                             &mut mapped,
                             &mut mapper,
                             &mut outputs,
-                            &device,
+                            &mut device,
                             &mut keyboard,
                         )?;
                         keyboard.set_visible(false);
@@ -198,9 +167,7 @@ fn main() -> Result<()> {
             ipc.respond(command, response);
         }
 
-        let mut received = false;
         if let Some(event) = device.poll()? {
-            received = true;
             match event {
                 DeviceEvent::State(state) => {
                     let was_visible = keyboard.visible;
@@ -210,7 +177,7 @@ fn main() -> Result<()> {
                         &mut mapped,
                         &mut mapper,
                         &mut outputs,
-                        &device,
+                        &mut device,
                         &mut keyboard,
                     )?;
                     match (was_visible, keyboard.visible) {
@@ -253,7 +220,7 @@ fn main() -> Result<()> {
                         &mut mapped,
                         &mut mapper,
                         &mut outputs,
-                        &device,
+                        &mut device,
                         &mut keyboard,
                     )?;
                     keyboard.set_visible(false);
@@ -266,37 +233,30 @@ fn main() -> Result<()> {
             }
         }
 
-        if device.connected()
-            && !device.steam_enabled()
-            && last_lizard_refresh.elapsed() >= Duration::from_secs(3)
-        {
-            device.suppress_lizard_mode()?;
+        if device.connected() && last_lizard_refresh.elapsed() >= Duration::from_secs(3) {
+            device.suppress_lizard_mode();
             last_lizard_refresh = Instant::now();
         }
         if let Some(next) = outputs.poll_rumble()? {
             rumble = next;
-            if !device.steam_enabled() {
-                device.rumble(rumble.0, rumble.1)?;
-            }
+            device.rumble(rumble.0, rumble.1);
             last_rumble = Instant::now();
-        } else if !device.steam_enabled()
-            && rumble != (0, 0)
-            && last_rumble.elapsed() >= Duration::from_millis(40)
-        {
-            device.rumble(rumble.0, rumble.1)?;
+        } else if rumble != (0, 0) && last_rumble.elapsed() >= Duration::from_millis(40) {
+            device.rumble(rumble.0, rumble.1);
             last_rumble = Instant::now();
         }
-        if !received {
+        if !device.connected() {
             thread::sleep(Duration::from_millis(1));
         }
     }
+    Ok(())
 }
 
 fn emit(
     mapped: &mut Vec<Output>,
     mapper: &mut Mapper,
     outputs: &mut Outputs,
-    device: &DeviceManager,
+    device: &mut DeviceManager,
     keyboard: &mut OskState,
 ) -> Result<()> {
     if mapped
@@ -311,20 +271,21 @@ fn emit(
         match output {
             Output::ModeChanged { name, haptic } => {
                 log::info!("active mode: {name}");
-                outputs.set_gamepad(if device.steam_enabled() {
-                    Gamepad::None
-                } else {
-                    mapper.gamepad()
-                })?;
+                outputs.set_gamepad(mapper.gamepad())?;
                 if let Some(haptic) = haptic {
-                    device.play_haptic(haptic)?;
+                    device.play_haptic(haptic);
                 }
             }
-            Output::TrackpadHaptic { pad } => device.trackpad_haptic(pad)?,
+            Output::TrackpadHaptic { pad } => {
+                device.play_haptic(scd::protocol::Haptic::TrackpadClick {
+                    trackpad: pad,
+                    gain: -15,
+                })
+            }
             output => outputs.emit(&output)?,
         }
     }
-    outputs.sync_gamepad()
+    Ok(())
 }
 
 fn sync_keyboard(mapper: &Mapper, keyboard: &mut OskState) {

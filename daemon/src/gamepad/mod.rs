@@ -1,4 +1,4 @@
-mod dualshock4;
+mod dualshock;
 mod xbox;
 
 use scd::Result;
@@ -6,7 +6,7 @@ use scd::config::{Gamepad, GamepadButton};
 
 use crate::mapper::GamepadAxis;
 
-use dualshock4::DualShock4;
+use dualshock::DualShock4;
 use xbox::Xbox;
 
 pub enum VirtualGamepad {

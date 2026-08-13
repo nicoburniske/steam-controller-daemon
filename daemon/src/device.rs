@@ -1,24 +1,24 @@
-use hidapi::{HidApi, HidDevice};
+use rusb::{Context, DeviceHandle, UsbContext};
+use scd::Result;
 use scd::protocol::{
     ControllerState, Haptic, PROTEUS_PRODUCT_ID, Report, Trackpad, VALVE_VENDOR_ID,
     imu_mode_report, lizard_mode_report, parse_report, trackpad_click_pressure_report,
 };
-use std::ffi::CString;
-use std::fs;
-use std::path::Path;
 use std::time::{Duration, Instant};
 
-use crate::steam::SteamDevice;
-use scd::Result;
+const FIRST_INTERFACE: u8 = 2;
+const SLOT_COUNT: u8 = 4;
+const POLL_TIMEOUT: Duration = Duration::from_millis(1);
+const USB_TIMEOUT: Duration = Duration::from_millis(10);
 
 pub struct DeviceManager {
-    api: HidApi,
-    slots: Vec<Slot>,
-    active: Option<usize>,
+    context: Context,
+    puck: Option<DeviceHandle<Context>>,
+    active: Option<u8>,
     trackpad_click_pressure: u16,
     last_state: Option<Instant>,
     last_scan: Instant,
-    steam: Option<SteamDevice>,
+    disconnected: bool,
 }
 
 pub enum DeviceEvent {
@@ -27,37 +27,28 @@ pub enum DeviceEvent {
     Disconnected,
 }
 
-struct Slot {
-    interface: i32,
-    path: CString,
-    device: HidDevice,
-}
-
 impl DeviceManager {
     pub fn new() -> Result<Self> {
-        let api = HidApi::new()?;
-        let steam = SteamDevice::recover()?;
         let mut manager = Self {
-            api,
-            slots: Vec::new(),
+            context: Context::new()?,
+            puck: None,
             active: None,
             trackpad_click_pressure: 25,
             last_state: None,
             last_scan: Instant::now() - Duration::from_secs(2),
-            steam,
+            disconnected: false,
         };
-        if manager.steam.is_none() {
-            manager.scan()?;
-        }
+        manager.scan();
         Ok(manager)
     }
 
     pub fn poll(&mut self) -> Result<Option<DeviceEvent>> {
-        if self.steam.is_some() {
-            return Ok(None);
+        if self.disconnected {
+            self.disconnected = false;
+            return Ok(Some(DeviceEvent::Disconnected));
         }
-        if self.active.is_none() && self.last_scan.elapsed() >= Duration::from_secs(1) {
-            self.scan()?;
+        if self.puck.is_none() && self.last_scan.elapsed() >= Duration::from_secs(1) {
+            self.scan();
         }
 
         if self.active.is_some()
@@ -70,222 +61,187 @@ impl DeviceManager {
             return Ok(Some(DeviceEvent::Disconnected));
         }
 
+        let Some(puck) = &self.puck else {
+            return Ok(None);
+        };
         let mut report = [0; 64];
-        for index in 0..self.slots.len() {
-            match self.slots[index].device.read(&mut report) {
-                Ok(0) => continue,
-                Ok(length) => {
-                    let Some(parsed) = parse_report(&report[..length]) else {
+        for slot in 0..SLOT_COUNT {
+            let interface = FIRST_INTERFACE + slot;
+            if self.active.is_some_and(|active| active != interface) {
+                continue;
+            }
+            let length =
+                match puck.read_interrupt(0x80 | (interface + 1), &mut report, POLL_TIMEOUT) {
+                    Ok(length) => length,
+                    Err(rusb::Error::Timeout) => continue,
+                    Err(rusb::Error::Interrupted) => continue,
+                    Err(rusb::Error::Pipe) if puck.clear_halt(0x80 | (interface + 1)).is_ok() => {
                         continue;
-                    };
-                    match parsed {
-                        Report::Disconnected if self.active == Some(index) => {
-                            self.active = None;
-                            self.last_state = None;
-                            return Ok(Some(DeviceEvent::Disconnected));
-                        }
-                        Report::Disconnected => {}
-                        Report::State(state) => {
-                            if self.active.is_none() {
-                                self.active = Some(index);
-                                self.configure(index)?;
-                                log::info!(
-                                    "controller connected on puck interface {}",
-                                    self.slots[index].interface
-                                );
-                            }
-                            if self.active == Some(index) {
-                                self.last_state = Some(Instant::now());
-                                return Ok(Some(DeviceEvent::State(state)));
-                            }
-                            log::warn!(
-                                "ignoring additional controller on puck interface {}",
-                                self.slots[index].interface
+                    }
+                    Err(error) => {
+                        log::warn!("controller read failed: {error}");
+                        let disconnected = self.reset();
+                        return Ok(disconnected.then_some(DeviceEvent::Disconnected));
+                    }
+                };
+            let Some(parsed) = parse_report(&report[..length]) else {
+                continue;
+            };
+            match parsed {
+                Report::Disconnected if self.active == Some(interface) => {
+                    self.active = None;
+                    self.last_state = None;
+                    return Ok(Some(DeviceEvent::Disconnected));
+                }
+                Report::Disconnected => {}
+                Report::State(state) => {
+                    if self.active.is_none() {
+                        let mut configured = self
+                            .send_feature(interface, &lizard_mode_report(false))
+                            && self.send_feature(interface, &imu_mode_report(true));
+                        for pad in [Trackpad::Left, Trackpad::Right] {
+                            configured &= self.send_feature(
+                                interface,
+                                &trackpad_click_pressure_report(pad, self.trackpad_click_pressure),
                             );
                         }
-                        Report::Battery { percent, charging } if self.active == Some(index) => {
-                            return Ok(Some(DeviceEvent::Battery { percent, charging }));
+                        if !configured {
+                            self.reset();
+                            return Ok(None);
                         }
-                        Report::Battery { .. } => {}
+                        self.active = Some(interface);
+                        log::info!("controller connected on puck interface {interface}");
                     }
+                    if self.active == Some(interface) {
+                        self.last_state = Some(Instant::now());
+                        return Ok(Some(DeviceEvent::State(state)));
+                    }
+                    log::warn!("ignoring additional controller on puck interface {interface}");
                 }
-                Err(error) => {
-                    log::warn!("controller read failed: {error}");
-                    let disconnected = self.active.take().is_some();
-                    self.last_state = None;
-                    self.slots.clear();
-                    self.last_scan = Instant::now() - Duration::from_secs(2);
-                    return Ok(disconnected.then_some(DeviceEvent::Disconnected));
+                Report::Battery { percent, charging } if self.active == Some(interface) => {
+                    return Ok(Some(DeviceEvent::Battery { percent, charging }));
                 }
+                Report::Battery { .. } => {}
             }
         }
-
         Ok(None)
     }
 
     pub fn connected(&self) -> bool {
-        self.active.is_some() || self.steam.is_some()
-    }
-
-    pub fn steam_enabled(&self) -> bool {
-        self.steam.is_some()
-    }
-
-    pub fn set_steam(&mut self, enabled: bool) -> Result<()> {
-        if enabled == self.steam.is_some() {
-            return Ok(());
-        }
-        if enabled {
-            let active = self
-                .active
-                .ok_or_else(|| scd::Error::message("controller is not connected"))?;
-            let hidraw = Path::new(self.slots[active].path.to_str()?)
-                .file_name()
-                .ok_or_else(|| scd::Error::message("controller has no hidraw device name"))?;
-            let sysfs =
-                fs::canonicalize(Path::new("/sys/class/hidraw").join(hidraw).join("device"))?;
-            let bus_id = sysfs
-                .ancestors()
-                .find(|path| {
-                    fs::read_to_string(path.join("idVendor")).is_ok_and(|value| value == "28de\n")
-                        && fs::read_to_string(path.join("idProduct"))
-                            .is_ok_and(|value| value == "1304\n")
-                })
-                .and_then(Path::file_name)
-                .and_then(|name| name.to_str())
-                .ok_or_else(|| scd::Error::message("could not find the controller USB device"))?
-                .to_owned();
-            self.active = None;
-            self.last_state = None;
-            self.slots.clear();
-            match SteamDevice::attach(bus_id) {
-                Ok(steam) => self.steam = Some(steam),
-                Err(error) => {
-                    self.last_scan = Instant::now() - Duration::from_secs(2);
-                    return Err(error);
-                }
-            }
-        } else {
-            let steam = self.steam.take().expect("Steam handoff exists");
-            if let Err(error) = steam.detach() {
-                self.steam = Some(steam);
-                return Err(error);
-            }
-            self.last_scan = Instant::now() - Duration::from_secs(2);
-        }
-        Ok(())
+        self.active.is_some()
     }
 
     pub fn device_name(&self) -> Option<String> {
-        if self.steam.is_some() {
-            Some("28de:1304".into())
-        } else {
-            self.active
-                .map(|index| format!("28de:1304 interface {}", self.slots[index].interface))
+        self.active
+            .map(|interface| format!("28de:1304 interface {interface}"))
+    }
+
+    pub fn suppress_lizard_mode(&self) {
+        if let Some(interface) = self.active {
+            self.send_feature(interface, &lizard_mode_report(false));
         }
     }
 
-    pub fn suppress_lizard_mode(&self) -> Result<()> {
-        if let Some(active) = self.active {
-            self.slots[active]
-                .device
-                .send_feature_report(&lizard_mode_report(false))?;
-        }
-        Ok(())
-    }
-
-    pub fn set_trackpad_click_pressure(&mut self, pressure: u16) -> Result<()> {
+    pub fn set_trackpad_click_pressure(&mut self, pressure: u16) {
         self.trackpad_click_pressure = pressure;
-        if let Some(active) = self.active {
+        if let Some(interface) = self.active {
+            let mut configured = true;
             for pad in [Trackpad::Left, Trackpad::Right] {
-                self.slots[active]
-                    .device
-                    .send_feature_report(&trackpad_click_pressure_report(pad, pressure))?;
+                configured &=
+                    self.send_feature(interface, &trackpad_click_pressure_report(pad, pressure));
+            }
+            if !configured {
+                self.disconnected = self.reset();
             }
         }
-        Ok(())
     }
 
-    pub fn rumble(&self, low_frequency: u16, high_frequency: u16) -> Result<()> {
+    pub fn rumble(&mut self, low_frequency: u16, high_frequency: u16) {
         self.play_haptic(Haptic::Rumble {
             low_frequency,
             high_frequency,
-        })
+        });
     }
 
-    pub fn trackpad_haptic(&self, trackpad: Trackpad) -> Result<()> {
-        self.play_haptic(Haptic::TrackpadClick {
-            trackpad,
-            gain: -15,
-        })
-    }
-
-    pub fn play_haptic(&self, haptic: Haptic) -> Result<()> {
-        let Some(active) = self.active else {
-            return Ok(());
+    pub fn play_haptic(&mut self, haptic: Haptic) {
+        let (Some(puck), Some(interface)) = (&self.puck, self.active) else {
+            return;
         };
         let mut report = [0; 10];
         let length = haptic.encode(&mut report);
-        self.slots[active].device.write(&report[..length])?;
-        Ok(())
+        let mut result = puck.write_interrupt(interface, &report[..length], USB_TIMEOUT);
+        if result == Err(rusb::Error::Pipe) && puck.clear_halt(interface).is_ok() {
+            result = puck.write_interrupt(interface, &report[..length], USB_TIMEOUT);
+        }
+        match result {
+            Ok(written) if written == length => {}
+            Ok(written) => log::warn!("short controller haptic write: {written}/{length}"),
+            Err(rusb::Error::Pipe | rusb::Error::NoDevice) => {
+                self.disconnected = self.reset();
+            }
+            Err(error) => log::warn!("controller haptic write failed: {error}"),
+        }
     }
 
-    fn scan(&mut self) -> Result<()> {
+    fn scan(&mut self) {
         self.last_scan = Instant::now();
-        self.api.refresh_devices()?;
-        let previous_slot_count = self.slots.len();
-        for info in self.api.device_list().filter(|info| {
-            info.vendor_id() == VALVE_VENDOR_ID
-                && info.product_id() == PROTEUS_PRODUCT_ID
-                && (2..=5).contains(&info.interface_number())
-        }) {
-            if self
-                .slots
-                .iter()
-                .any(|slot| slot.path.as_c_str() == info.path())
+        let devices = match self.context.devices() {
+            Ok(devices) => devices,
+            Err(error) => {
+                log::warn!("could not scan for Steam Controller puck: {error}");
+                return;
+            }
+        };
+        'devices: for device in devices.iter() {
+            let Ok(descriptor) = device.device_descriptor() else {
+                continue;
+            };
+            if descriptor.vendor_id() != VALVE_VENDOR_ID
+                || descriptor.product_id() != PROTEUS_PRODUCT_ID
             {
                 continue;
             }
-            match self.api.open_path(info.path()) {
-                Ok(device) => {
-                    if let Err(error) = device.set_blocking_mode(false) {
-                        log::warn!("could not make puck interface nonblocking: {error}");
-                        continue;
-                    }
-                    self.slots.push(Slot {
-                        interface: info.interface_number(),
-                        path: info.path().to_owned(),
-                        device,
-                    });
+            let handle = match device.open() {
+                Ok(handle) => handle,
+                Err(error) => {
+                    log::warn!("could not open Steam Controller puck: {error}");
+                    continue;
                 }
-                Err(error) => log::warn!(
-                    "could not open puck interface {}: {error}",
-                    info.interface_number()
-                ),
+            };
+            if let Err(error) = handle.set_auto_detach_kernel_driver(true) {
+                log::warn!("could not enable Steam Controller driver handoff: {error}");
+                continue;
             }
+            for interface in FIRST_INTERFACE..FIRST_INTERFACE + SLOT_COUNT {
+                if let Err(error) = handle.claim_interface(interface) {
+                    log::warn!(
+                        "could not claim Steam Controller puck interface {interface}: {error}"
+                    );
+                    continue 'devices;
+                }
+            }
+            self.puck = Some(handle);
+            log::info!("claimed {SLOT_COUNT} Steam Controller puck slots");
+            break;
         }
-        self.slots.sort_by_key(|slot| slot.interface);
-        if self.slots.len() != previous_slot_count {
-            log::info!("opened {} Steam Controller puck slots", self.slots.len());
-        }
-        Ok(())
     }
 
-    fn configure(&self, index: usize) -> Result<()> {
-        self.slots[index]
-            .device
-            .send_feature_report(&lizard_mode_report(false))?;
-        self.slots[index]
-            .device
-            .send_feature_report(&imu_mode_report(true))?;
-        for pad in [Trackpad::Left, Trackpad::Right] {
-            self.slots[index]
-                .device
-                .send_feature_report(&trackpad_click_pressure_report(
-                    pad,
-                    self.trackpad_click_pressure,
-                ))?;
+    fn reset(&mut self) -> bool {
+        let disconnected = self.active.take().is_some();
+        self.last_state = None;
+        self.puck = None;
+        self.last_scan = Instant::now() - Duration::from_secs(2);
+        disconnected
+    }
+
+    fn send_feature(&self, interface: u8, report: &[u8; 64]) -> bool {
+        if let Some(puck) = &self.puck {
+            match puck.write_control(0x21, 9, 0x0301, u16::from(interface), report, USB_TIMEOUT) {
+                Ok(64) => return true,
+                Ok(written) => log::warn!("short controller feature write: {written}/64"),
+                Err(error) => log::warn!("controller feature write failed: {error}"),
+            }
         }
-        Ok(())
+        false
     }
 }
