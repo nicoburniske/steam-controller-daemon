@@ -6,8 +6,7 @@
 }: let
   cfg = config.services.scd;
   udevRules = pkgs.writeTextDir "lib/udev/rules.d/72-scd.rules" ''
-    KERNEL=="uhid", OWNER:="root", GROUP:="scd", MODE:="0660"
-    KERNEL=="hidg0", OWNER:="root", GROUP:="scd", MODE:="0660"
+    KERNEL=="hidg0", OWNER:="scd", GROUP:="scd", MODE:="0660"
     SUBSYSTEM=="hidraw", KERNEL=="hidraw*", KERNELS=="0003:054C:0BA0.*", TAG+="uaccess", GROUP:="input", MODE:="0660"
     SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="28de", ATTR{idProduct}=="1304", TAG-="uaccess", OWNER:="scd", GROUP:="scd-control", MODE:="0600"
     TEST!="/run/scd/steam-device", SUBSYSTEM=="hidraw", KERNEL=="hidraw*", ATTRS{idVendor}=="28de", ATTRS{idProduct}=="1304", OWNER:="root", GROUP:="scd", MODE:="0660"
@@ -42,7 +41,6 @@ in {
   config = lib.mkIf cfg.enable {
     environment.systemPackages = [cfg.package];
     boot.kernelModules = [
-      "uhid"
       "dummy_hcd"
       "libcomposite"
       "usb_f_hid"
@@ -69,13 +67,14 @@ in {
         after = [
           "systemd-modules-load.service"
           "systemd-udevd.service"
+          "sys-kernel-config.mount"
         ];
+        requires = ["sys-kernel-config.mount"];
         serviceConfig = {
           ExecStartPre = [
             "+${pkgs.systemd}/bin/udevadm trigger --settle --action=change --property-match=ID_VENDOR_ID=28de --property-match=ID_MODEL_ID=1304"
             "+${lib.getExe' cfg.package "scd"} --setup-dualshock-gadget"
-            "+${pkgs.coreutils}/bin/chown scd /sys/kernel/config/usb_gadget/scd-dualshock/UDC"
-            "+${pkgs.systemd}/bin/udevadm settle"
+            "+${pkgs.coreutils}/bin/chown scd:scd /sys/kernel/config/usb_gadget/scd-dualshock/UDC"
           ];
           ExecStart = "${lib.getExe' cfg.package "scd"} --socket /run/scd/control.sock";
           ExecStopPost = "+${lib.getExe' cfg.package "scd"} --unbind-dualshock-gadget";

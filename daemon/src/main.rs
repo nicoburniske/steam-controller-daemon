@@ -37,10 +37,10 @@ fn main() -> Result<()> {
         unbind_dualshock_gadget,
     } = Args::parse();
     if setup_dualshock_gadget {
-        return gamepad::dualshock4::setup();
+        return gamepad::setup_dualshock_gadget();
     }
     if unbind_dualshock_gadget {
-        return gamepad::dualshock4::unbind();
+        return gamepad::unbind_dualshock_gadget();
     }
     let mut device = DeviceManager::new()?;
     let mut mapper = Mapper::empty();

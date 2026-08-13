@@ -1,8 +1,11 @@
+use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use scd::config::GamepadButton;
 use scd::protocol::{ControllerState, Trackpad};
@@ -69,6 +72,100 @@ const FIRMWARE_REPORT: &[u8; 49] = &[
     0x00,
 ];
 
+pub fn setup() -> Result<()> {
+    if Path::new(GADGET_PATH).exists() {
+        unbind()?;
+        let link = format!("{GADGET_PATH}/configs/c.1/hid.usb0");
+        if let Err(error) = fs::remove_file(&link)
+            && error.kind() != io::ErrorKind::NotFound
+        {
+            return Err(Error::message(error));
+        }
+        for directory in [
+            "configs/c.1/strings/0x409",
+            "configs/c.1",
+            "functions/hid.usb0",
+            "strings/0x409",
+            "",
+        ] {
+            let path = if directory.is_empty() {
+                GADGET_PATH.to_owned()
+            } else {
+                format!("{GADGET_PATH}/{directory}")
+            };
+            if let Err(error) = fs::remove_dir(&path)
+                && error.kind() != io::ErrorKind::NotFound
+            {
+                return Err(Error::message(format_args!(
+                    "failed to remove stale DualShock gadget {path}: {error}"
+                )));
+            }
+        }
+    }
+
+    fs::create_dir(GADGET_PATH)?;
+    fs::write(format!("{GADGET_PATH}/idVendor"), b"0x054c")?;
+    fs::write(format!("{GADGET_PATH}/idProduct"), b"0x0ba0")?;
+    fs::write(format!("{GADGET_PATH}/bcdDevice"), b"0x0100")?;
+    fs::write(format!("{GADGET_PATH}/bcdUSB"), b"0x0200")?;
+
+    fs::create_dir(format!("{GADGET_PATH}/strings/0x409"))?;
+    fs::write(
+        format!("{GADGET_PATH}/strings/0x409/manufacturer"),
+        b"Sony Interactive Entertainment",
+    )?;
+    fs::write(
+        format!("{GADGET_PATH}/strings/0x409/product"),
+        b"DUALSHOCK 4 USB Wireless Adaptor",
+    )?;
+    fs::write(
+        format!("{GADGET_PATH}/strings/0x409/serialnumber"),
+        b"1c660d07098b",
+    )?;
+
+    fs::create_dir(format!("{GADGET_PATH}/configs/c.1"))?;
+    fs::write(format!("{GADGET_PATH}/configs/c.1/MaxPower"), b"500")?;
+    fs::create_dir(format!("{GADGET_PATH}/configs/c.1/strings/0x409"))?;
+    fs::write(
+        format!("{GADGET_PATH}/configs/c.1/strings/0x409/configuration"),
+        b"DualShock 4 wireless adapter",
+    )?;
+
+    fs::create_dir(format!("{GADGET_PATH}/functions/hid.usb0"))?;
+    fs::write(format!("{GADGET_PATH}/functions/hid.usb0/protocol"), b"0")?;
+    fs::write(format!("{GADGET_PATH}/functions/hid.usb0/subclass"), b"0")?;
+    fs::write(
+        format!("{GADGET_PATH}/functions/hid.usb0/report_length"),
+        b"64",
+    )?;
+    let no_out_endpoint = format!("{GADGET_PATH}/functions/hid.usb0/no_out_endpoint");
+    if Path::new(&no_out_endpoint).exists() {
+        fs::write(no_out_endpoint, b"0")?;
+    }
+    fs::write(
+        format!("{GADGET_PATH}/functions/hid.usb0/report_desc"),
+        REPORT_DESCRIPTOR,
+    )?;
+    std::os::unix::fs::symlink(
+        "../../functions/hid.usb0",
+        format!("{GADGET_PATH}/configs/c.1/hid.usb0"),
+    )?;
+    log::info!(
+        "configured unbound DualShock 4 USB gadget 054c:0ba0 version 0100 with {}-byte descriptor",
+        REPORT_DESCRIPTOR.len()
+    );
+    Ok(())
+}
+
+pub fn unbind() -> Result<()> {
+    if !Path::new(UDC_PATH).exists() {
+        return Ok(());
+    }
+    fs::write(UDC_PATH, b"\n")?;
+    log::info!("unbound DualShock 4 USB gadget");
+    Ok(())
+}
+
 pub struct DualShock4 {
     device: File,
     state: State,
@@ -86,6 +183,8 @@ struct HidReport {
     data: [u8; 64],
     padding: [u8; 4],
 }
+
+const _: () = assert!(std::mem::size_of::<HidReport>() == 72);
 
 struct State {
     sticks: [u8; 4],
@@ -129,30 +228,50 @@ impl Default for State {
 
 impl DualShock4 {
     pub fn new() -> Result<Self> {
-        let mut device = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .custom_flags(libc::O_NONBLOCK)
-            .open("/dev/uhid")?;
-        let mut event = [0; UHID_EVENT_SIZE];
-        event[..4].copy_from_slice(&UHID_CREATE2.to_ne_bytes());
-        let name = b"Sony Interactive Entertainment Wireless Controller";
-        event[4..4 + name.len()].copy_from_slice(name);
-        let phys = b"usb-0000:00:00.0-1/input3";
-        event[132..132 + phys.len()].copy_from_slice(phys);
-        let uniq = b"1c:66:6d:07:09:8b";
-        event[196..196 + uniq.len()].copy_from_slice(uniq);
-        event[260..262].copy_from_slice(&(REPORT_DESCRIPTOR.len() as u16).to_ne_bytes());
-        event[262..264].copy_from_slice(&3_u16.to_ne_bytes());
-        event[264..268].copy_from_slice(&0x054c_u32.to_ne_bytes());
-        event[268..272].copy_from_slice(&0x0ba0_u32.to_ne_bytes());
-        event[272..276].copy_from_slice(&0x0100_u32.to_ne_bytes());
-        event[276..280].copy_from_slice(&0_u32.to_ne_bytes());
-        event[280..280 + REPORT_DESCRIPTOR.len()].copy_from_slice(REPORT_DESCRIPTOR);
-        device.write_all(&event[..280 + REPORT_DESCRIPTOR.len()])?;
+        let mut udc: Option<OsString> = None;
+        for entry in fs::read_dir("/sys/class/udc")? {
+            let name = entry?.file_name();
+            if name.as_encoded_bytes().starts_with(b"dummy_udc.") {
+                if udc.is_some() {
+                    return Err(Error::message(
+                        "multiple dummy USB device controllers found",
+                    ));
+                }
+                udc = Some(name);
+            }
+        }
+        let udc = udc.ok_or_else(|| Error::message("no dummy USB device controller found"))?;
+        fs::write(UDC_PATH, udc.as_encoded_bytes())?;
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let device = loop {
+            match OpenOptions::new()
+                .read(true)
+                .write(true)
+                .custom_flags(libc::O_NONBLOCK)
+                .open("/dev/hidg0")
+            {
+                Ok(device) => break device,
+                Err(error)
+                    if Instant::now() < deadline
+                        && matches!(
+                            error.kind(),
+                            io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied
+                        ) =>
+                {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => {
+                    if let Err(unbind_error) = fs::write(UDC_PATH, b"\n") {
+                        log::error!("failed to unbind DualShock USB gadget: {unbind_error}");
+                    }
+                    return Err(Error::message(error));
+                }
+            }
+        };
         log::info!(
-            "created DualShock 4 wireless adapter 054c:0ba0 version 0100 with {}-byte descriptor",
-            REPORT_DESCRIPTOR.len()
+            "bound DualShock 4 wireless adapter to {}",
+            udc.to_string_lossy()
         );
 
         let mut gamepad = Self {
@@ -262,68 +381,60 @@ impl DualShock4 {
 
     pub fn sync(&mut self) -> Result<()> {
         let report = self.state.report(self.counter, self.touch_timestamp);
-        self.counter = self.counter.wrapping_add(1) & 0x3f;
-        let mut event = [0; 70];
-        event[..4].copy_from_slice(&UHID_INPUT2.to_ne_bytes());
-        event[4..6].copy_from_slice(&(report.len() as u16).to_ne_bytes());
-        event[6..].copy_from_slice(&report);
-        self.device.write_all(&event)?;
-        log::info!("DualShock input report: {report:02x?}");
-        Ok(())
+        match self.device.write(&report) {
+            Ok(size) if size == report.len() => {
+                self.counter = self.counter.wrapping_add(1) & 0x3f;
+                log::info!("DualShock input report: {report:02x?}");
+                Ok(())
+            }
+            Ok(size) => Err(Error::message(format_args!(
+                "short DualShock input report write: {size} bytes"
+            ))),
+            Err(error)
+                if error.kind() == io::ErrorKind::WouldBlock
+                    || matches!(
+                        error.raw_os_error(),
+                        Some(libc::ESHUTDOWN | libc::ENODEV | libc::EPIPE)
+                    ) =>
+            {
+                log::info!("DualShock input report deferred: {error}");
+                Ok(())
+            }
+            Err(error) => Err(Error::message(error)),
+        }
     }
 
     pub fn poll_rumble(&mut self) -> Result<Option<(u16, u16)>> {
         loop {
-            let mut event = [0; UHID_EVENT_SIZE];
-            let event_size = match self.device.read(&mut event) {
-                Ok(0) => return Err(Error::message("/dev/uhid closed")),
-                Ok(size) => size,
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
-                Err(error) => return Err(Error::message(error)),
+            let mut pollfd = libc::pollfd {
+                fd: self.device.as_raw_fd(),
+                events: libc::POLLIN | libc::POLLPRI,
+                revents: 0,
             };
-            if event_size < 4 {
-                log::info!("short DualShock UHID event: {event_size} bytes");
-                continue;
+            let ready = unsafe { libc::poll(&mut pollfd, 1, 0) };
+            if ready < 0 {
+                return Err(Error::message(io::Error::last_os_error()));
             }
-            let event_type = u32::from_ne_bytes(event[..4].try_into().unwrap());
-            match event_type {
-                UHID_OUTPUT => {
-                    if event_size < 4103 {
-                        log::info!(
-                            "short DualShock output event: {event_size} bytes data={:02x?}",
-                            &event[..event_size]
-                        );
-                        continue;
+            if ready == 0 {
+                break;
+            }
+            if pollfd.revents & libc::POLLPRI != 0 {
+                let mut report_id = 0_u8;
+                if unsafe {
+                    libc::ioctl(
+                        self.device.as_raw_fd(),
+                        GADGET_HID_READ_GET_REPORT_ID,
+                        &mut report_id,
+                    )
+                } < 0
+                {
+                    let error = io::Error::last_os_error();
+                    if error.kind() != io::ErrorKind::WouldBlock {
+                        return Err(Error::message(error));
                     }
-                    let size =
-                        usize::from(u16::from_ne_bytes(event[4100..4102].try_into().unwrap()));
-                    let size = size.min(4096).min(event_size - 4);
-                    log::info!(
-                        "DualShock output report type={} data={:02x?}",
-                        event[4102],
-                        &event[4..4 + size]
-                    );
-                    if size >= 6 && event[4] == 0x05 && event[5] & 1 != 0 {
-                        self.rumble = (u16::from(event[9]) * 257, u16::from(event[8]) * 257);
-                    }
-                }
-                UHID_GET_REPORT => {
-                    if event_size < 10 {
-                        log::info!(
-                            "short DualShock get report event: {event_size} bytes data={:02x?}",
-                            &event[..event_size]
-                        );
-                        continue;
-                    }
-                    let id = u32::from_ne_bytes(event[4..8].try_into().unwrap());
+                } else {
                     let mut data = [0; 64];
-                    log::info!(
-                        "DualShock get report request={} number={:02x} type={}",
-                        id,
-                        event[8],
-                        event[9]
-                    );
-                    let report: &[u8] = match event[8] {
+                    let report: &[u8] = match report_id {
                         0x02 => CALIBRATION_REPORT,
                         0x12 => PAIRING_REPORT,
                         0x81 => MAC_REPORT,
@@ -360,57 +471,52 @@ impl DualShock4 {
                                 0xb0 | 0xb3 | 0xb4 | 0xf0 | 0xf1 => 64,
                                 0xe2 => 17,
                                 _ => {
-                                    let mut reply = [0; 12];
-                                    reply[..4]
-                                        .copy_from_slice(&UHID_GET_REPORT_REPLY.to_ne_bytes());
-                                    reply[4..8].copy_from_slice(&id.to_ne_bytes());
-                                    reply[8..10].copy_from_slice(&(libc::EIO as u16).to_ne_bytes());
-                                    self.device.write_all(&reply)?;
-                                    log::info!(
-                                        "DualShock get report reply={} number={report:02x} error={}",
-                                        id,
-                                        libc::EIO
-                                    );
-                                    continue;
+                                    log::info!("unknown DualShock get report number={report:02x}");
+                                    1
                                 }
                             };
                             data[0] = report;
                             &data[..length]
                         }
                     };
-                    let mut reply = [0; 76];
-                    reply[..4].copy_from_slice(&UHID_GET_REPORT_REPLY.to_ne_bytes());
-                    reply[4..8].copy_from_slice(&id.to_ne_bytes());
-                    reply[10..12].copy_from_slice(&(report.len() as u16).to_ne_bytes());
-                    reply[12..12 + report.len()].copy_from_slice(report);
-                    self.device.write_all(&reply[..12 + report.len()])?;
-                    log::info!("DualShock get report reply={} data={report:02x?}", id);
-                }
-                UHID_SET_REPORT => {
-                    if event_size < 12 {
-                        log::info!(
-                            "short DualShock set report event: {event_size} bytes data={:02x?}",
-                            &event[..event_size]
-                        );
-                        continue;
+                    let mut response = HidReport {
+                        report_id,
+                        userspace_req: 1,
+                        length: report.len() as u16,
+                        data: [0; 64],
+                        padding: [0; 4],
+                    };
+                    response.data[..report.len()].copy_from_slice(report);
+                    if unsafe {
+                        libc::ioctl(
+                            self.device.as_raw_fd(),
+                            GADGET_HID_WRITE_GET_REPORT,
+                            &response,
+                        )
+                    } < 0
+                    {
+                        return Err(Error::message(io::Error::last_os_error()));
                     }
-                    let id = u32::from_ne_bytes(event[4..8].try_into().unwrap());
-                    let size = usize::from(u16::from_ne_bytes(event[10..12].try_into().unwrap()));
-                    let size = size.min(event_size - 12);
-                    log::info!(
-                        "DualShock set report request={} number={:02x} type={} data={:02x?}",
-                        id,
-                        event[8],
-                        event[9],
-                        &event[12..12 + size]
-                    );
-                    let mut reply = [0; 10];
-                    reply[..4].copy_from_slice(&UHID_SET_REPORT_REPLY.to_ne_bytes());
-                    reply[4..8].copy_from_slice(&id.to_ne_bytes());
-                    self.device.write_all(&reply)?;
-                    log::info!("DualShock set report reply={id} error=0");
+                    log::info!("DualShock get report number={report_id:02x} data={report:02x?}");
                 }
-                _ => log::info!("DualShock UHID event={event_type}"),
+            }
+            if pollfd.revents & libc::POLLIN != 0 {
+                let mut report = [0; 64];
+                match self.device.read(&mut report) {
+                    Ok(0) => return Err(Error::message("/dev/hidg0 closed")),
+                    Ok(size) => {
+                        log::info!("DualShock output report: {:02x?}", &report[..size]);
+                        if size >= 6 && report[0] == 0x05 && report[1] & 1 != 0 {
+                            self.rumble = (u16::from(report[5]) * 257, u16::from(report[4]) * 257);
+                        }
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+                    Err(error) => return Err(Error::message(error)),
+                }
+            }
+            if pollfd.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0 {
+                log::info!("DualShock USB gadget poll error: {:#x}", pollfd.revents);
+                break;
             }
         }
         if self.rumble == self.reported_rumble {
@@ -418,6 +524,18 @@ impl DualShock4 {
         }
         self.reported_rumble = self.rumble;
         Ok(Some(self.rumble))
+    }
+}
+
+impl Drop for DualShock4 {
+    fn drop(&mut self) {
+        if let Err(error) = fs::write(UDC_PATH, b"\n")
+            && error.kind() != io::ErrorKind::NotFound
+        {
+            log::error!("failed to unbind DualShock USB gadget: {error}");
+        } else {
+            log::info!("unbound DualShock 4 wireless adapter");
+        }
     }
 }
 

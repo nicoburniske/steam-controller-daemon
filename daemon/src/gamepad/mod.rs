@@ -1,4 +1,4 @@
-pub mod dualshock4;
+mod dualshock4;
 mod xbox;
 
 use scd::Result;
@@ -8,6 +8,14 @@ use crate::mapper::GamepadAxis;
 
 use dualshock4::DualShock4;
 use xbox::Xbox;
+
+pub fn setup_dualshock_gadget() -> Result<()> {
+    dualshock4::setup()
+}
+
+pub fn unbind_dualshock_gadget() -> Result<()> {
+    dualshock4::unbind()
+}
 
 pub enum VirtualGamepad {
     Xbox(Xbox),
