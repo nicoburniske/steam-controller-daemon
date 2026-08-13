@@ -1,4 +1,5 @@
 mod dualshock4;
+mod usbip;
 mod xbox;
 
 use scd::Result;
@@ -47,13 +48,6 @@ impl VirtualGamepad {
         match self {
             Self::Xbox(gamepad) => gamepad.poll_rumble(),
             Self::DualShock4(gamepad) => gamepad.poll_rumble(),
-        }
-    }
-
-    pub fn tick(&mut self, now: std::time::Instant) -> Result<()> {
-        match self {
-            Self::Xbox(_) => Ok(()),
-            Self::DualShock4(gamepad) => gamepad.tick(now),
         }
     }
 }

@@ -186,12 +186,6 @@ impl Outputs {
         }
     }
 
-    pub fn tick(&mut self, now: std::time::Instant) -> Result<()> {
-        self.gamepad
-            .as_mut()
-            .map_or(Ok(()), |gamepad| gamepad.tick(now))
-    }
-
     fn emit_relative(
         device: &mut VirtualDevice,
         remainder: &mut [f32; 2],

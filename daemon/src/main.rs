@@ -266,7 +266,6 @@ fn main() -> Result<()> {
             }
         }
 
-        outputs.tick(Instant::now())?;
         if device.connected()
             && !device.steam_enabled()
             && last_lizard_refresh.elapsed() >= Duration::from_secs(3)

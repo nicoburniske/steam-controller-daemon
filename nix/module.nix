@@ -6,8 +6,7 @@
 }: let
   cfg = config.services.scd;
   udevRules = pkgs.writeTextDir "lib/udev/rules.d/72-scd.rules" ''
-    KERNEL=="uhid", OWNER:="root", GROUP:="scd", MODE:="0660"
-    SUBSYSTEM=="hidraw", KERNEL=="hidraw*", KERNELS=="0005:054C:09CC.*", TAG+="uaccess", GROUP:="input", MODE:="0660"
+    SUBSYSTEM=="hidraw", KERNEL=="hidraw*", KERNELS=="0003:054C:09CC.*", TAG+="uaccess", GROUP:="input", MODE:="0660"
     SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="28de", ATTR{idProduct}=="1304", TAG-="uaccess", OWNER:="scd", GROUP:="scd-control", MODE:="0600"
     TEST!="/run/scd/steam-device", SUBSYSTEM=="hidraw", KERNEL=="hidraw*", ATTRS{idVendor}=="28de", ATTRS{idProduct}=="1304", OWNER:="root", GROUP:="scd", MODE:="0660"
     TEST!="/run/scd/steam-device", SUBSYSTEM=="tty", ATTRS{idVendor}=="28de", ATTRS{idProduct}=="1304", OWNER:="root", GROUP:="root", MODE:="0000"
@@ -40,7 +39,7 @@ in {
   };
   config = lib.mkIf cfg.enable {
     environment.systemPackages = [cfg.package];
-    boot.kernelModules = ["uhid"];
+    boot.kernelModules = ["vhci_hcd"];
     hardware.uinput.enable = true;
     services.udev.packages = [
       udevRules
@@ -60,9 +59,16 @@ in {
       services.scd = {
         description = "Steam Controller daemon";
         wantedBy = ["multi-user.target"];
-        after = ["systemd-udevd.service"];
+        after = [
+          "systemd-modules-load.service"
+          "systemd-udevd.service"
+        ];
         serviceConfig = {
-          ExecStartPre = "+${pkgs.systemd}/bin/udevadm trigger --settle --action=change --property-match=ID_VENDOR_ID=28de --property-match=ID_MODEL_ID=1304";
+          ExecStartPre = [
+            "+${pkgs.coreutils}/bin/chgrp scd /sys/devices/platform/vhci_hcd.0/attach /sys/devices/platform/vhci_hcd.0/detach"
+            "+${pkgs.coreutils}/bin/chmod 0660 /sys/devices/platform/vhci_hcd.0/attach /sys/devices/platform/vhci_hcd.0/detach"
+            "+${pkgs.systemd}/bin/udevadm trigger --settle --action=change --property-match=ID_VENDOR_ID=28de --property-match=ID_MODEL_ID=1304"
+          ];
           ExecStart = "${lib.getExe' cfg.package "scd"} --socket /run/scd/control.sock";
           User = "scd";
           Group = "scd-control";

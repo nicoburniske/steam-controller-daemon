@@ -15,7 +15,7 @@ expect rough edges and breaking changes
   - live reload
 - input mapping
   - keyboard and mouse output
-  - Xbox + DualShock 4 gamepad emulation
+  - Xbox + wired DualShock 4 gamepad emulation
   - gyro and trackpad controls
 - modes and hold layers
 - global button chords
