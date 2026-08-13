@@ -147,7 +147,7 @@ pub fn setup() -> Result<()> {
         REPORT_DESCRIPTOR,
     )?;
     std::os::unix::fs::symlink(
-        "../../functions/hid.usb0",
+        format!("{GADGET_PATH}/functions/hid.usb0"),
         format!("{GADGET_PATH}/configs/c.1/hid.usb0"),
     )?;
     log::info!(
