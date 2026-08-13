@@ -175,14 +175,14 @@ impl Outputs {
     }
 
     pub fn update_gamepad_source(&mut self, state: &ControllerState, touchpad: Option<Trackpad>) {
-        if let Some(VirtualGamepad::DualSense(gamepad)) = &mut self.gamepad {
+        if let Some(VirtualGamepad::DualShock4(gamepad)) = &mut self.gamepad {
             gamepad.update_source(state, touchpad);
         }
     }
 
-    pub fn set_gamepad_battery(&mut self, percent: u8, charging: bool) {
-        if let Some(VirtualGamepad::DualSense(gamepad)) = &mut self.gamepad {
-            gamepad.set_battery(percent, charging);
+    pub fn set_gamepad_battery(&mut self, percent: u8) {
+        if let Some(VirtualGamepad::DualShock4(gamepad)) = &mut self.gamepad {
+            gamepad.set_battery(percent);
         }
     }
 
