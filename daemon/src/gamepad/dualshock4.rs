@@ -17,7 +17,7 @@ const UHID_INPUT2: u32 = 12;
 const UHID_SET_REPORT: u32 = 13;
 const UHID_SET_REPORT_REPLY: u32 = 14;
 
-const REPORT_DESCRIPTOR: &[u8; 507] = &[
+const REPORT_DESCRIPTOR: &[u8; 531] = &[
     0x05, 0x01, 0x09, 0x05, 0xa1, 0x01, 0x85, 0x01, 0x09, 0x30, 0x09, 0x31, 0x09, 0x32, 0x09, 0x35,
     0x15, 0x00, 0x26, 0xff, 0x00, 0x75, 0x08, 0x95, 0x04, 0x81, 0x02, 0x09, 0x39, 0x15, 0x00, 0x25,
     0x07, 0x35, 0x00, 0x46, 0x3b, 0x01, 0x65, 0x14, 0x75, 0x04, 0x95, 0x01, 0x81, 0x42, 0x65, 0x00,
@@ -49,7 +49,9 @@ const REPORT_DESCRIPTOR: &[u8; 507] = &[
     0xb1, 0x02, 0x85, 0xaf, 0x09, 0x53, 0x95, 0x02, 0xb1, 0x02, 0x85, 0xb0, 0x09, 0x54, 0x95, 0x3f,
     0xb1, 0x02, 0x85, 0xb1, 0x09, 0x55, 0x95, 0x02, 0xb1, 0x02, 0x85, 0xb2, 0x09, 0x56, 0x95, 0x02,
     0xb1, 0x02, 0x85, 0xe0, 0x09, 0x57, 0x95, 0x02, 0xb1, 0x02, 0x85, 0xb3, 0x09, 0x55, 0x95, 0x3f,
-    0xb1, 0x02, 0x85, 0xb4, 0x09, 0x55, 0x95, 0x3f, 0xb1, 0x02, 0xc0,
+    0xb1, 0x02, 0x85, 0xb4, 0x09, 0x55, 0x95, 0x3f, 0xb1, 0x02, 0x85, 0xe1, 0x09, 0x57, 0x95, 0x30,
+    0xb1, 0x02, 0x85, 0xe2, 0x09, 0x57, 0x95, 0x10, 0xb1, 0x02, 0x85, 0xe3, 0x09, 0x57, 0x95, 0x04,
+    0xb1, 0x02, 0xc0,
 ];
 
 const CALIBRATION_REPORT: &[u8; 37] = &[
@@ -61,6 +63,7 @@ const PAIRING_REPORT: &[u8; 16] = &[
     0x12, 0x8b, 0x09, 0x07, 0x6d, 0x66, 0x1c, 0x08, 0x25, 0x00, 0xac, 0x9e, 0x17, 0x94, 0x05, 0xb0,
 ];
 const MAC_REPORT: &[u8; 7] = &[0x81, 0x8b, 0x09, 0x07, 0x6d, 0x66, 0x1c];
+const ADAPTER_CONTROLLER_REPORT: &[u8; 5] = &[0xe3, 0x4c, 0x05, 0xcc, 0x09];
 const FIRMWARE_REPORT: &[u8; 49] = &[
     0xa3, 0x41, 0x75, 0x67, 0x20, 0x20, 0x33, 0x20, 0x32, 0x30, 0x31, 0x33, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x30, 0x37, 0x3a, 0x30, 0x31, 0x3a, 0x31, 0x32, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -140,6 +143,10 @@ impl DualShock4 {
         event[276..280].copy_from_slice(&0_u32.to_ne_bytes());
         event[280..280 + REPORT_DESCRIPTOR.len()].copy_from_slice(REPORT_DESCRIPTOR);
         device.write_all(&event[..280 + REPORT_DESCRIPTOR.len()])?;
+        log::info!(
+            "created DualShock 4 wireless adapter 054c:0ba0 version 0100 with {}-byte descriptor",
+            REPORT_DESCRIPTOR.len()
+        );
 
         let mut gamepad = Self {
             device,
@@ -254,34 +261,72 @@ impl DualShock4 {
         event[4..6].copy_from_slice(&(report.len() as u16).to_ne_bytes());
         event[6..].copy_from_slice(&report);
         self.device.write_all(&event)?;
+        log::info!("DualShock input report: {report:02x?}");
         Ok(())
     }
 
     pub fn poll_rumble(&mut self) -> Result<Option<(u16, u16)>> {
         loop {
             let mut event = [0; UHID_EVENT_SIZE];
-            match self.device.read(&mut event) {
+            let event_size = match self.device.read(&mut event) {
                 Ok(0) => return Err(Error::message("/dev/uhid closed")),
-                Ok(_) => {}
+                Ok(size) => size,
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
                 Err(error) => return Err(Error::message(error)),
+            };
+            if event_size < 4 {
+                log::info!("short DualShock UHID event: {event_size} bytes");
+                continue;
             }
-            match u32::from_ne_bytes(event[..4].try_into().unwrap()) {
+            let event_type = u32::from_ne_bytes(event[..4].try_into().unwrap());
+            match event_type {
                 UHID_OUTPUT => {
+                    if event_size < 4103 {
+                        log::info!(
+                            "short DualShock output event: {event_size} bytes data={:02x?}",
+                            &event[..event_size]
+                        );
+                        continue;
+                    }
                     let size =
                         usize::from(u16::from_ne_bytes(event[4100..4102].try_into().unwrap()));
+                    let size = size.min(4096).min(event_size - 4);
+                    log::info!(
+                        "DualShock output report type={} data={:02x?}",
+                        event[4102],
+                        &event[4..4 + size]
+                    );
                     if size >= 6 && event[4] == 0x05 && event[5] & 1 != 0 {
                         self.rumble = (u16::from(event[9]) * 257, u16::from(event[8]) * 257);
                     }
                 }
                 UHID_GET_REPORT => {
+                    if event_size < 10 {
+                        log::info!(
+                            "short DualShock get report event: {event_size} bytes data={:02x?}",
+                            &event[..event_size]
+                        );
+                        continue;
+                    }
                     let id = u32::from_ne_bytes(event[4..8].try_into().unwrap());
                     let mut data = [0; 64];
+                    log::info!(
+                        "DualShock get report request={} number={:02x} type={}",
+                        id,
+                        event[8],
+                        event[9]
+                    );
                     let report: &[u8] = match event[8] {
                         0x02 => CALIBRATION_REPORT,
                         0x12 => PAIRING_REPORT,
                         0x81 => MAC_REPORT,
                         0xa3 => FIRMWARE_REPORT,
+                        0xe1 => {
+                            data[..FIRMWARE_REPORT.len()].copy_from_slice(FIRMWARE_REPORT);
+                            data[0] = 0xe1;
+                            &data[..FIRMWARE_REPORT.len()]
+                        }
+                        0xe3 => ADAPTER_CONTROLLER_REPORT,
                         report => {
                             let length = match report {
                                 0x04 => 37,
@@ -306,6 +351,7 @@ impl DualShock4 {
                                 0xab | 0xac => 58,
                                 0xad => 12,
                                 0xb0 | 0xb3 | 0xb4 | 0xf0 | 0xf1 => 64,
+                                0xe2 => 17,
                                 _ => {
                                     let mut reply = [0; 12];
                                     reply[..4]
@@ -313,6 +359,11 @@ impl DualShock4 {
                                     reply[4..8].copy_from_slice(&id.to_ne_bytes());
                                     reply[8..10].copy_from_slice(&(libc::EIO as u16).to_ne_bytes());
                                     self.device.write_all(&reply)?;
+                                    log::info!(
+                                        "DualShock get report reply={} number={report:02x} error={}",
+                                        id,
+                                        libc::EIO
+                                    );
                                     continue;
                                 }
                             };
@@ -326,15 +377,33 @@ impl DualShock4 {
                     reply[10..12].copy_from_slice(&(report.len() as u16).to_ne_bytes());
                     reply[12..12 + report.len()].copy_from_slice(report);
                     self.device.write_all(&reply[..12 + report.len()])?;
+                    log::info!("DualShock get report reply={} data={report:02x?}", id);
                 }
                 UHID_SET_REPORT => {
+                    if event_size < 12 {
+                        log::info!(
+                            "short DualShock set report event: {event_size} bytes data={:02x?}",
+                            &event[..event_size]
+                        );
+                        continue;
+                    }
                     let id = u32::from_ne_bytes(event[4..8].try_into().unwrap());
+                    let size = usize::from(u16::from_ne_bytes(event[10..12].try_into().unwrap()));
+                    let size = size.min(event_size - 12);
+                    log::info!(
+                        "DualShock set report request={} number={:02x} type={} data={:02x?}",
+                        id,
+                        event[8],
+                        event[9],
+                        &event[12..12 + size]
+                    );
                     let mut reply = [0; 10];
                     reply[..4].copy_from_slice(&UHID_SET_REPORT_REPLY.to_ne_bytes());
                     reply[4..8].copy_from_slice(&id.to_ne_bytes());
                     self.device.write_all(&reply)?;
+                    log::info!("DualShock set report reply={id} error=0");
                 }
-                _ => {}
+                _ => log::info!("DualShock UHID event={event_type}"),
             }
         }
         if self.rumble == self.reported_rumble {
@@ -439,5 +508,31 @@ mod tests {
         assert_eq!(&report[30..35], &[0x15, 0, 0, 1, 7]);
         assert_eq!(&report[35..39], &[3, 0x7f, 0xd7, 0x3a]);
         assert_eq!(report[39], 0x80);
+    }
+
+    #[test]
+    fn advertises_wireless_adapter_reports() {
+        assert!(
+            REPORT_DESCRIPTOR
+                .windows(8)
+                .any(|entry| entry == [0x85, 0xe1, 0x09, 0x57, 0x95, 0x30, 0xb1, 0x02])
+        );
+        assert!(
+            REPORT_DESCRIPTOR
+                .windows(8)
+                .any(|entry| entry == [0x85, 0xe2, 0x09, 0x57, 0x95, 0x10, 0xb1, 0x02])
+        );
+        assert!(
+            REPORT_DESCRIPTOR
+                .windows(8)
+                .any(|entry| entry == [0x85, 0xe3, 0x09, 0x57, 0x95, 0x04, 0xb1, 0x02])
+        );
+    }
+
+    #[test]
+    fn identifies_attached_ds4() {
+        assert_eq!(ADAPTER_CONTROLLER_REPORT, &[0xe3, 0x4c, 0x05, 0xcc, 0x09]);
+        assert_eq!(&FIRMWARE_REPORT[35..37], &[0x00, 0x31]);
+        assert_eq!(State::default().report(0, 0)[31] & 0x04, 0);
     }
 }
