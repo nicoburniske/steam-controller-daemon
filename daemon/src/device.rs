@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 const FIRST_INTERFACE: u8 = 2;
 const SLOT_COUNT: u8 = 4;
 const POLL_TIMEOUT: Duration = Duration::from_millis(1);
-const USB_TIMEOUT: Duration = Duration::from_millis(100);
+const USB_TIMEOUT: Duration = Duration::from_millis(10);
 
 pub struct DeviceManager {
     context: Context,
@@ -18,6 +18,7 @@ pub struct DeviceManager {
     trackpad_click_pressure: u16,
     last_state: Option<Instant>,
     last_scan: Instant,
+    disconnected: bool,
 }
 
 pub enum DeviceEvent {
@@ -35,12 +36,17 @@ impl DeviceManager {
             trackpad_click_pressure: 25,
             last_state: None,
             last_scan: Instant::now() - Duration::from_secs(2),
+            disconnected: false,
         };
         manager.scan();
         Ok(manager)
     }
 
     pub fn poll(&mut self) -> Result<Option<DeviceEvent>> {
+        if self.disconnected {
+            self.disconnected = false;
+            return Ok(Some(DeviceEvent::Disconnected));
+        }
         if self.puck.is_none() && self.last_scan.elapsed() >= Duration::from_secs(1) {
             self.scan();
         }
@@ -68,12 +74,13 @@ impl DeviceManager {
                 match puck.read_interrupt(0x80 | (interface + 1), &mut report, POLL_TIMEOUT) {
                     Ok(length) => length,
                     Err(rusb::Error::Timeout) => continue,
+                    Err(rusb::Error::Interrupted) => continue,
+                    Err(rusb::Error::Pipe) if puck.clear_halt(0x80 | (interface + 1)).is_ok() => {
+                        continue;
+                    }
                     Err(error) => {
                         log::warn!("controller read failed: {error}");
-                        let disconnected = self.active.take().is_some();
-                        self.last_state = None;
-                        self.puck = None;
-                        self.last_scan = Instant::now() - Duration::from_secs(2);
+                        let disconnected = self.reset();
                         return Ok(disconnected.then_some(DeviceEvent::Disconnected));
                     }
                 };
@@ -89,8 +96,20 @@ impl DeviceManager {
                 Report::Disconnected => {}
                 Report::State(state) => {
                     if self.active.is_none() {
+                        let mut configured = self
+                            .send_feature(interface, &lizard_mode_report(false))
+                            && self.send_feature(interface, &imu_mode_report(true));
+                        for pad in [Trackpad::Left, Trackpad::Right] {
+                            configured &= self.send_feature(
+                                interface,
+                                &trackpad_click_pressure_report(pad, self.trackpad_click_pressure),
+                            );
+                        }
+                        if !configured {
+                            self.reset();
+                            return Ok(None);
+                        }
                         self.active = Some(interface);
-                        self.configure(interface)?;
                         log::info!("controller connected on puck interface {interface}");
                     }
                     if self.active == Some(interface) {
@@ -117,45 +136,51 @@ impl DeviceManager {
             .map(|interface| format!("28de:1304 interface {interface}"))
     }
 
-    pub fn suppress_lizard_mode(&self) -> Result<()> {
+    pub fn suppress_lizard_mode(&self) {
         if let Some(interface) = self.active {
-            self.send_feature(interface, &lizard_mode_report(false))?;
+            self.send_feature(interface, &lizard_mode_report(false));
         }
-        Ok(())
     }
 
-    pub fn set_trackpad_click_pressure(&mut self, pressure: u16) -> Result<()> {
+    pub fn set_trackpad_click_pressure(&mut self, pressure: u16) {
         self.trackpad_click_pressure = pressure;
         if let Some(interface) = self.active {
+            let mut configured = true;
             for pad in [Trackpad::Left, Trackpad::Right] {
-                self.send_feature(interface, &trackpad_click_pressure_report(pad, pressure))?;
+                configured &=
+                    self.send_feature(interface, &trackpad_click_pressure_report(pad, pressure));
+            }
+            if !configured {
+                self.disconnected = self.reset();
             }
         }
-        Ok(())
     }
 
-    pub fn rumble(&self, low_frequency: u16, high_frequency: u16) -> Result<()> {
+    pub fn rumble(&mut self, low_frequency: u16, high_frequency: u16) {
         self.play_haptic(Haptic::Rumble {
             low_frequency,
             high_frequency,
-        })
+        });
     }
 
-    pub fn trackpad_haptic(&self, trackpad: Trackpad) -> Result<()> {
-        self.play_haptic(Haptic::TrackpadClick {
-            trackpad,
-            gain: -15,
-        })
-    }
-
-    pub fn play_haptic(&self, haptic: Haptic) -> Result<()> {
+    pub fn play_haptic(&mut self, haptic: Haptic) {
         let (Some(puck), Some(interface)) = (&self.puck, self.active) else {
-            return Ok(());
+            return;
         };
         let mut report = [0; 10];
         let length = haptic.encode(&mut report);
-        puck.write_interrupt(interface, &report[..length], USB_TIMEOUT)?;
-        Ok(())
+        let mut result = puck.write_interrupt(interface, &report[..length], USB_TIMEOUT);
+        if result == Err(rusb::Error::Pipe) && puck.clear_halt(interface).is_ok() {
+            result = puck.write_interrupt(interface, &report[..length], USB_TIMEOUT);
+        }
+        match result {
+            Ok(written) if written == length => {}
+            Ok(written) => log::warn!("short controller haptic write: {written}/{length}"),
+            Err(rusb::Error::Pipe | rusb::Error::NoDevice) => {
+                self.disconnected = self.reset();
+            }
+            Err(error) => log::warn!("controller haptic write failed: {error}"),
+        }
     }
 
     fn scan(&mut self) {
@@ -201,22 +226,22 @@ impl DeviceManager {
         }
     }
 
-    fn configure(&self, interface: u8) -> Result<()> {
-        self.send_feature(interface, &lizard_mode_report(false))?;
-        self.send_feature(interface, &imu_mode_report(true))?;
-        for pad in [Trackpad::Left, Trackpad::Right] {
-            self.send_feature(
-                interface,
-                &trackpad_click_pressure_report(pad, self.trackpad_click_pressure),
-            )?;
-        }
-        Ok(())
+    fn reset(&mut self) -> bool {
+        let disconnected = self.active.take().is_some();
+        self.last_state = None;
+        self.puck = None;
+        self.last_scan = Instant::now() - Duration::from_secs(2);
+        disconnected
     }
 
-    fn send_feature(&self, interface: u8, report: &[u8; 64]) -> Result<()> {
+    fn send_feature(&self, interface: u8, report: &[u8; 64]) -> bool {
         if let Some(puck) = &self.puck {
-            puck.write_control(0x21, 9, 0x0301, u16::from(interface), report, USB_TIMEOUT)?;
+            match puck.write_control(0x21, 9, 0x0301, u16::from(interface), report, USB_TIMEOUT) {
+                Ok(64) => return true,
+                Ok(written) => log::warn!("short controller feature write: {written}/64"),
+                Err(error) => log::warn!("controller feature write failed: {error}"),
+            }
         }
-        Ok(())
+        false
     }
 }

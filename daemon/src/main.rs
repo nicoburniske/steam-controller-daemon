@@ -14,6 +14,10 @@ use scd::Result;
 use scd::config::{Config, Gamepad, is_keyboard_key};
 use scd::ipc::{OskPad, OskPadSide, OskState, Request, Response, Status};
 use std::path::PathBuf;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -27,6 +31,9 @@ struct Args {
 fn main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     let Args { socket } = Args::parse();
+    let terminated = Arc::new(AtomicBool::new(false));
+    signal_hook::flag::register(signal_hook::consts::SIGTERM, terminated.clone())?;
+    signal_hook::flag::register(signal_hook::consts::SIGINT, terminated.clone())?;
     let mut device = DeviceManager::new()?;
     let mut mapper = Mapper::empty();
     let mut mapped = Vec::new();
@@ -43,8 +50,8 @@ fn main() -> Result<()> {
     let mut last_rumble = Instant::now();
 
     log::info!("active mode: {}", mapper.active_mode());
-    loop {
-        for command in commands.try_iter() {
+    while !terminated.load(Ordering::Relaxed) {
+        for command in commands.try_iter().take(32) {
             let response = match &command.request {
                 Request::Status => Response::Status {
                     status: Status {
@@ -61,7 +68,7 @@ fn main() -> Result<()> {
                             &mut mapped,
                             &mut mapper,
                             &mut outputs,
-                            &device,
+                            &mut device,
                             &mut keyboard,
                         )?;
                         publish_keyboard(&mapper, &mut keyboard, &mut ipc);
@@ -77,28 +84,26 @@ fn main() -> Result<()> {
                         &mut mapped,
                         &mut mapper,
                         &mut outputs,
-                        &device,
+                        &mut device,
                         &mut keyboard,
                     )?;
                     publish_keyboard(&mapper, &mut keyboard, &mut ipc);
                     Response::Done
                 }
-                Request::Haptic { haptic } => match device.play_haptic(*haptic) {
-                    Ok(()) => Response::Done,
-                    Err(error) => Response::Error {
-                        message: error.to_string(),
-                    },
-                },
+                Request::Haptic { haptic } => {
+                    device.play_haptic(*haptic);
+                    Response::Done
+                }
                 Request::ConfigApply { source } => match Config::parse(source) {
                     Ok(config) => {
-                        device.set_trackpad_click_pressure(config.click_pressure)?;
+                        device.set_trackpad_click_pressure(config.click_pressure);
                         mapper.reload(config, &mut mapped);
                         keyboard.set_bindings(mapper.osk_bindings());
                         emit(
                             &mut mapped,
                             &mut mapper,
                             &mut outputs,
-                            &device,
+                            &mut device,
                             &mut keyboard,
                         )?;
                         publish_keyboard(&mapper, &mut keyboard, &mut ipc);
@@ -119,7 +124,7 @@ fn main() -> Result<()> {
                             &mut mapped,
                             &mut mapper,
                             &mut outputs,
-                            &device,
+                            &mut device,
                             &mut keyboard,
                         )?;
                         keyboard.set_visible(false);
@@ -157,9 +162,7 @@ fn main() -> Result<()> {
             ipc.respond(command, response);
         }
 
-        let mut received = false;
         if let Some(event) = device.poll()? {
-            received = true;
             match event {
                 DeviceEvent::State(state) => {
                     let was_visible = keyboard.visible;
@@ -169,7 +172,7 @@ fn main() -> Result<()> {
                         &mut mapped,
                         &mut mapper,
                         &mut outputs,
-                        &device,
+                        &mut device,
                         &mut keyboard,
                     )?;
                     match (was_visible, keyboard.visible) {
@@ -212,7 +215,7 @@ fn main() -> Result<()> {
                         &mut mapped,
                         &mut mapper,
                         &mut outputs,
-                        &device,
+                        &mut device,
                         &mut keyboard,
                     )?;
                     keyboard.set_visible(false);
@@ -226,28 +229,29 @@ fn main() -> Result<()> {
         }
 
         if device.connected() && last_lizard_refresh.elapsed() >= Duration::from_secs(3) {
-            device.suppress_lizard_mode()?;
+            device.suppress_lizard_mode();
             last_lizard_refresh = Instant::now();
         }
         if let Some(next) = outputs.poll_rumble()? {
             rumble = next;
-            device.rumble(rumble.0, rumble.1)?;
+            device.rumble(rumble.0, rumble.1);
             last_rumble = Instant::now();
         } else if rumble != (0, 0) && last_rumble.elapsed() >= Duration::from_millis(40) {
-            device.rumble(rumble.0, rumble.1)?;
+            device.rumble(rumble.0, rumble.1);
             last_rumble = Instant::now();
         }
-        if !received && !device.connected() {
+        if !device.connected() {
             thread::sleep(Duration::from_millis(1));
         }
     }
+    Ok(())
 }
 
 fn emit(
     mapped: &mut Vec<Output>,
     mapper: &mut Mapper,
     outputs: &mut Outputs,
-    device: &DeviceManager,
+    device: &mut DeviceManager,
     keyboard: &mut OskState,
 ) -> Result<()> {
     if mapped
@@ -264,10 +268,15 @@ fn emit(
                 log::info!("active mode: {name}");
                 outputs.set_gamepad(mapper.gamepad())?;
                 if let Some(haptic) = haptic {
-                    device.play_haptic(haptic)?;
+                    device.play_haptic(haptic);
                 }
             }
-            Output::TrackpadHaptic { pad } => device.trackpad_haptic(pad)?,
+            Output::TrackpadHaptic { pad } => {
+                device.play_haptic(scd::protocol::Haptic::TrackpadClick {
+                    trackpad: pad,
+                    gain: -15,
+                })
+            }
             output => outputs.emit(&output)?,
         }
     }
