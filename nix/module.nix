@@ -6,13 +6,15 @@
 }: let
   cfg = config.services.scd;
   udevRules = pkgs.writeTextDir "lib/udev/rules.d/72-scd.rules" ''
+    # expose the emulated wired controller to the graphical session
     SUBSYSTEM=="hidraw", KERNEL=="hidraw*", KERNELS=="0003:054C:09CC.*", TAG+="uaccess", GROUP:="input", MODE:="0660"
+    # reserve the physical receiver for scd unless it is handed to steam
     SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="28de", ATTR{idProduct}=="1304", TAG-="uaccess", OWNER:="scd", GROUP:="scd-control", MODE:="0600"
     TEST!="/run/scd/steam-device", SUBSYSTEM=="hidraw", KERNEL=="hidraw*", ATTRS{idVendor}=="28de", ATTRS{idProduct}=="1304", OWNER:="root", GROUP:="scd", MODE:="0660"
     TEST!="/run/scd/steam-device", SUBSYSTEM=="tty", ATTRS{idVendor}=="28de", ATTRS{idProduct}=="1304", OWNER:="root", GROUP:="root", MODE:="0000"
     TEST!="/run/scd/steam-device", SUBSYSTEM=="input", ATTRS{id/vendor}=="28de", ATTRS{id/product}=="1304", OWNER:="root", GROUP:="root", MODE:="0000", ENV{LIBINPUT_IGNORE_DEVICE}="1"
   '';
-  # uaccess runs at 73, so clear any stale puck ACL afterward
+  # clear receiver ACLs added by the later uaccess rules
   aclRules = pkgs.writeTextDir "lib/udev/rules.d/74-scd.rules" ''
     ACTION!="remove", TEST!="/run/scd/steam-device", SUBSYSTEMS=="usb", ATTRS{idVendor}=="28de", ATTRS{idProduct}=="1304", ENV{DEVNAME}!="", TAG-="uaccess", RUN{program}+="${lib.getExe' pkgs.acl "setfacl"} --remove-all $env{DEVNAME}"
   '';
@@ -39,6 +41,7 @@ in {
   };
   config = lib.mkIf cfg.enable {
     environment.systemPackages = [cfg.package];
+    # provide the virtual usb host used by wired dualshock emulation
     boot.kernelModules = ["vhci_hcd"];
     hardware.uinput.enable = true;
     services.udev.packages = [
@@ -48,11 +51,12 @@ in {
     users = {
       groups = {
         scd = {};
+        # permit user clients to access the daemon socket
         scd-control = {};
       };
       users.scd = {
         isSystemUser = true;
-        group = "scd";
+        group = "scd-control";
       };
     };
     systemd = {
@@ -65,18 +69,20 @@ in {
         ];
         serviceConfig = {
           ExecStartPre = [
+            # grant the daemon access to attach and detach virtual usb devices
             "+${pkgs.coreutils}/bin/chgrp scd /sys/devices/platform/vhci_hcd.0/attach /sys/devices/platform/vhci_hcd.0/detach"
             "+${pkgs.coreutils}/bin/chmod 0660 /sys/devices/platform/vhci_hcd.0/attach /sys/devices/platform/vhci_hcd.0/detach"
+            # reapply receiver permissions when it was connected before startup
             "+${pkgs.systemd}/bin/udevadm trigger --settle --action=change --property-match=ID_VENDOR_ID=28de --property-match=ID_MODEL_ID=1304"
           ];
           ExecStart = "${lib.getExe' cfg.package "scd"} --socket /run/scd/control.sock";
           User = "scd";
-          Group = "scd-control";
           SupplementaryGroups = [
             "scd"
             "uinput"
           ];
           RuntimeDirectory = "scd";
+          # retain steam handoff state across service restarts
           RuntimeDirectoryPreserve = "yes";
           RuntimeDirectoryMode = "0770";
           UMask = "0007";
