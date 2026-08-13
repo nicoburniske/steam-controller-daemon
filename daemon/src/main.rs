@@ -237,7 +237,7 @@ fn main() -> Result<()> {
             device.rumble(rumble.0, rumble.1)?;
             last_rumble = Instant::now();
         }
-        if !received {
+        if !received && !device.connected() {
             thread::sleep(Duration::from_millis(1));
         }
     }

@@ -85,10 +85,10 @@ in {
           "nixos-activation.service"
         ];
         partOf = ["graphical-session.target"];
-        pathConfig.PathChanged = [
-          "%E/scd/config.toml"
-          "/run/scd/control.sock"
-        ];
+        pathConfig = {
+          PathChanged = "%E/scd/config.toml";
+          PathExists = "/run/scd/control.sock";
+        };
       };
       user.services.scd-config = {
         description = "Apply the Steam Controller configuration";

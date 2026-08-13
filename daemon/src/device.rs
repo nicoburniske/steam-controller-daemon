@@ -36,13 +36,13 @@ impl DeviceManager {
             last_state: None,
             last_scan: Instant::now() - Duration::from_secs(2),
         };
-        manager.scan()?;
+        manager.scan();
         Ok(manager)
     }
 
     pub fn poll(&mut self) -> Result<Option<DeviceEvent>> {
         if self.puck.is_none() && self.last_scan.elapsed() >= Duration::from_secs(1) {
-            self.scan()?;
+            self.scan();
         }
 
         if self.active.is_some()
@@ -61,6 +61,9 @@ impl DeviceManager {
         let mut report = [0; 64];
         for slot in 0..SLOT_COUNT {
             let interface = FIRST_INTERFACE + slot;
+            if self.active.is_some_and(|active| active != interface) {
+                continue;
+            }
             let length =
                 match puck.read_interrupt(0x80 | (interface + 1), &mut report, POLL_TIMEOUT) {
                     Ok(length) => length,
@@ -155,25 +158,47 @@ impl DeviceManager {
         Ok(())
     }
 
-    fn scan(&mut self) -> Result<()> {
+    fn scan(&mut self) {
         self.last_scan = Instant::now();
-        for device in self.context.devices()?.iter() {
-            let descriptor = device.device_descriptor()?;
+        let devices = match self.context.devices() {
+            Ok(devices) => devices,
+            Err(error) => {
+                log::warn!("could not scan for Steam Controller puck: {error}");
+                return;
+            }
+        };
+        'devices: for device in devices.iter() {
+            let Ok(descriptor) = device.device_descriptor() else {
+                continue;
+            };
             if descriptor.vendor_id() != VALVE_VENDOR_ID
                 || descriptor.product_id() != PROTEUS_PRODUCT_ID
             {
                 continue;
             }
-            let handle = device.open()?;
-            handle.set_auto_detach_kernel_driver(true)?;
+            let handle = match device.open() {
+                Ok(handle) => handle,
+                Err(error) => {
+                    log::warn!("could not open Steam Controller puck: {error}");
+                    continue;
+                }
+            };
+            if let Err(error) = handle.set_auto_detach_kernel_driver(true) {
+                log::warn!("could not enable Steam Controller driver handoff: {error}");
+                continue;
+            }
             for interface in FIRST_INTERFACE..FIRST_INTERFACE + SLOT_COUNT {
-                handle.claim_interface(interface)?;
+                if let Err(error) = handle.claim_interface(interface) {
+                    log::warn!(
+                        "could not claim Steam Controller puck interface {interface}: {error}"
+                    );
+                    continue 'devices;
+                }
             }
             self.puck = Some(handle);
             log::info!("claimed {SLOT_COUNT} Steam Controller puck slots");
             break;
         }
-        Ok(())
     }
 
     fn configure(&self, interface: u8) -> Result<()> {
