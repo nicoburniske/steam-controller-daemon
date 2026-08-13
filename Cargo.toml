@@ -11,11 +11,10 @@ rust-version = "1.95"
 clap = { version = "4.5", features = ["derive"] }
 env_logger = "0.11"
 evdev = "0.13"
-indexmap = { version = "2.9", features = ["serde"] }
+indexmap = "2.9"
 kdl = { version = "6.7", default-features = false, features = ["span"] }
 log = "0.4"
 miette = { version = "7.6", default-features = false, features = ["fancy-no-syscall"] }
 scd = { path = "core" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-toml = { version = "0.9", features = ["preserve_order"] }

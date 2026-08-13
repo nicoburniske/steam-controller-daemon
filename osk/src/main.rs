@@ -38,7 +38,7 @@ fn main() -> Result<()> {
     let user_theme = env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
-        .map(|config| config.join("scd/osk.toml"));
+        .map(|config| config.join("scd/osk.kdl"));
     let theme = if let Some(path) = args.theme.as_deref() {
         Theme::load(path)?
     } else if let Some(path) = user_theme.filter(|path| path.exists()) {
@@ -50,7 +50,7 @@ fn main() -> Result<()> {
         .font
         .as_deref()
         .or(theme.font.as_deref())
-        .ok_or_else(|| Error::message("pass --font or configure font in osk.toml"))?;
+        .ok_or_else(|| Error::message("pass --font or configure font in osk.kdl"))?;
     let font = fs::read(font_path)?.into_boxed_slice();
     let width = args.width.unwrap_or(theme.width);
     let height = args.height.unwrap_or(theme.height);

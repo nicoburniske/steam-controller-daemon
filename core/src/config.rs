@@ -6,8 +6,8 @@ use miette::{Diagnostic, LabeledSpan, NamedSource, SourceCode};
 
 use crate::{
     kdl::{
-        Issue as ConfigIssue, KdlDocument, KdlNode, argument, arguments, children, issue, one_of,
-        properties, props, single,
+        Issue as ConfigIssue, KdlDocument, KdlNode, Spanned, argument, arguments, children, issue,
+        nodes, one_of, properties, props,
     },
     protocol::{Button, Buttons, Haptic, Trackpad},
 };
@@ -217,60 +217,34 @@ impl Config {
     }
 
     fn from_document(document: &KdlDocument) -> Result<Self, ConfigError> {
-        if let Some(node) = document.nodes().iter().find(|node| {
-            !matches!(
-                node.name().value(),
-                "version"
-                    | "default-mode"
-                    | "mode-switch-haptic"
-                    | "trackpad"
-                    | "osk"
-                    | "global"
-                    | "mode"
-            )
-        }) {
-            return Err(issue(
-                node,
-                format!("unexpected top-level node {:?}", node.name().value()),
-            )
-            .into());
-        }
-
-        let version_node =
-            single(document, "version")?.ok_or_else(|| issue(document, "missing version node"))?;
-        properties(version_node, &[])?;
-        let version: u32 = argument(version_node, 0)?;
-
-        let default_mode_node = single(document, "default-mode")?
-            .ok_or_else(|| issue(document, "missing default-mode node"))?;
-        properties(default_mode_node, &[])?;
-        let default_mode: &str = argument(default_mode_node, 0)?;
-
-        let mode_switch_haptic = single(document, "mode-switch-haptic")?
-            .map(parse_haptic)
-            .transpose()?;
-        let trackpad = single(document, "trackpad")?;
+        let (version, default_mode, mode_switch_haptic_node, trackpad, osk, global, mode_nodes) = nodes!(
+            document,
+            "version",
+            "default-mode",
+            optional "mode-switch-haptic",
+            optional "trackpad",
+            optional "osk",
+            optional "global",
+            many "mode",
+        )?;
+        let version: Spanned<u32> = version;
+        let default_mode: Spanned<&str> = default_mode;
+        let mode_switch_haptic = mode_switch_haptic_node.map(parse_haptic).transpose()?;
         let click_pressure = trackpad.map_or(Ok(25), |node| props!(node, "click-pressure" = 25))?;
-        let osk = single(document, "osk")?;
-        let global = single(document, "global")?;
 
         let mut error = ConfigError::default();
-        if version != 1 {
+        if version.value != 1 {
             error.push(issue(
-                version_node,
-                format!("version must be 1, got {version}"),
+                &version,
+                format!("version must be 1, got {}", version.value),
             ));
         }
-        let mode_count = document
-            .nodes()
-            .iter()
-            .filter(|node| node.name().value() == "mode")
-            .count();
+        let mode_count = mode_nodes.clone().count();
         if mode_count == 0 {
             error.push(issue(document, "at least one mode is required"));
         }
-        if default_mode.trim().is_empty() {
-            error.push(issue(default_mode_node, "default_mode must not be empty"));
+        if default_mode.value.trim().is_empty() {
+            error.push(issue(&default_mode, "default_mode must not be empty"));
         }
         if click_pressure > 100 {
             error.push(issue(
@@ -280,12 +254,7 @@ impl Config {
         }
 
         let mut mode_names = IndexMap::with_capacity(mode_count);
-        for (index, node) in document
-            .nodes()
-            .iter()
-            .filter(|node| node.name().value() == "mode")
-            .enumerate()
-        {
+        for (index, node) in mode_nodes.clone().enumerate() {
             let name: &str = argument(node, 0)?;
             if name.trim().is_empty() {
                 error.push(issue(node, "mode names must not be empty"));
@@ -296,11 +265,14 @@ impl Config {
                 mode_names.insert(name.to_owned(), ModeId(index));
             }
         }
-        let resolved_default_mode = mode_names.get(default_mode).copied();
+        let resolved_default_mode = mode_names.get(default_mode.value).copied();
         if resolved_default_mode.is_none() {
             error.push(issue(
-                default_mode_node,
-                format!("default_mode {default_mode:?} does not name a configured mode"),
+                &default_mode,
+                format!(
+                    "default_mode {:?} does not name a configured mode",
+                    default_mode.value
+                ),
             ));
         }
 
@@ -365,11 +337,7 @@ impl Config {
         }
 
         let mut modes = Vec::with_capacity(mode_count);
-        for node in document
-            .nodes()
-            .iter()
-            .filter(|node| node.name().value() == "mode")
-        {
+        for node in mode_nodes {
             modes.push(parse_mode(node, &mode_names, &mut error)?);
         }
 

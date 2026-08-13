@@ -1,10 +1,11 @@
 use blit::color::Color;
-use scd::Result;
-use serde::{Deserialize, Deserializer};
+use scd::{
+    Error,
+    kdl::{FromKdl, FromKdlNode, Issue, KdlDocument, KdlEntry, KdlNode, issue, nodes, props},
+};
 use std::{fs, path::Path, path::PathBuf};
 
-#[derive(Debug, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Debug)]
 pub struct Theme {
     pub font: Option<PathBuf>,
     pub width: u32,
@@ -12,8 +13,7 @@ pub struct Theme {
     pub colors: ThemeColors,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Debug)]
 pub struct ThemeColors {
     pub background: ThemeColor,
     pub border: ThemeColor,
@@ -34,8 +34,77 @@ pub struct ThemeColors {
 pub struct ThemeColor([u8; 4]);
 
 impl Theme {
-    pub fn load(path: &Path) -> Result<Self> {
-        Ok(toml::from_str(&fs::read_to_string(path)?)?)
+    pub fn load(path: &Path) -> scd::Result<Self> {
+        let source = fs::read_to_string(path)?;
+        Self::parse(&source).map_err(|error| Error::message(format!("{}: {error}", path.display())))
+    }
+
+    fn parse(source: &str) -> scd::Result<Self> {
+        let document = KdlDocument::parse(source)?;
+        let (font, width, height, colors) = nodes!(
+            &document,
+            optional "font",
+            "width" = 1280,
+            "height" = 360,
+            "colors" = ThemeColors::default(),
+        )?;
+        Ok(Self {
+            font,
+            width,
+            height,
+            colors,
+        })
+    }
+}
+
+impl FromKdlNode<'_> for ThemeColors {
+    fn from_kdl_node(node: &KdlNode) -> std::result::Result<Self, Issue> {
+        let default = ThemeColors::default();
+        let (
+            background,
+            border,
+            key,
+            special,
+            hover,
+            pressed,
+            pressed_foreground,
+            foreground,
+            muted,
+            dim,
+            hint_paddle,
+            hint_control,
+            shadow,
+        ) = props!(
+            node,
+            "background" = default.background,
+            "border" = default.border,
+            "key" = default.key,
+            "special" = default.special,
+            "hover" = default.hover,
+            "pressed" = default.pressed,
+            "pressed-foreground" = default.pressed_foreground,
+            "foreground" = default.foreground,
+            "muted" = default.muted,
+            "dim" = default.dim,
+            "hint-paddle" = default.hint_paddle,
+            "hint-control" = default.hint_control,
+            "shadow" = default.shadow,
+        )?;
+        Ok(Self {
+            background,
+            border,
+            key,
+            special,
+            hover,
+            pressed,
+            pressed_foreground,
+            foreground,
+            muted,
+            dim,
+            hint_paddle,
+            hint_control,
+            shadow,
+        })
     }
 }
 
@@ -80,20 +149,22 @@ impl ThemeColor {
     }
 }
 
-impl<'de> Deserialize<'de> for ThemeColor {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let value = String::deserialize(deserializer)?;
-        let value = value.strip_prefix('#').unwrap_or(&value);
+impl FromKdl<'_> for ThemeColor {
+    fn from_kdl(entry: &KdlEntry, field: &str) -> std::result::Result<Self, Issue> {
+        let value = entry
+            .value()
+            .as_string()
+            .ok_or_else(|| issue(entry, format!("{field} must be a string")))?;
+        let value = value.strip_prefix('#').unwrap_or(value);
         if !matches!(value.len(), 6 | 8) {
-            return Err(serde::de::Error::custom(
+            return Err(issue(
+                entry,
                 "color must contain six or eight hexadecimal digits",
             ));
         }
         let byte = |index| {
-            u8::from_str_radix(&value[index..index + 2], 16).map_err(serde::de::Error::custom)
+            u8::from_str_radix(&value[index..index + 2], 16)
+                .map_err(|_| issue(entry, "color must contain only hexadecimal digits"))
         };
         Ok(Self([
             byte(0)?,

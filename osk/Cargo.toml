@@ -12,6 +12,4 @@ env_logger.workspace = true
 evdev.workspace = true
 log.workspace = true
 scd.workspace = true
-serde.workspace = true
 smithay-client-toolkit = { version = "0.21.1", default-features = false, features = ["calloop"] }
-toml.workspace = true
