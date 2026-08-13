@@ -1,6 +1,8 @@
-use std::fs::{File, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::OpenOptionsExt;
+use std::path::Path;
 
 use scd::config::GamepadButton;
 use scd::protocol::{ControllerState, Trackpad};
@@ -8,14 +10,10 @@ use scd::{Error, Result};
 
 use crate::mapper::GamepadAxis;
 
-const UHID_EVENT_SIZE: usize = 4376;
-const UHID_OUTPUT: u32 = 6;
-const UHID_GET_REPORT: u32 = 9;
-const UHID_GET_REPORT_REPLY: u32 = 10;
-const UHID_CREATE2: u32 = 11;
-const UHID_INPUT2: u32 = 12;
-const UHID_SET_REPORT: u32 = 13;
-const UHID_SET_REPORT_REPLY: u32 = 14;
+const GADGET_PATH: &str = "/sys/kernel/config/usb_gadget/scd-dualshock";
+const UDC_PATH: &str = "/sys/kernel/config/usb_gadget/scd-dualshock/UDC";
+const GADGET_HID_READ_GET_REPORT_ID: libc::c_ulong = 0x8001_6741;
+const GADGET_HID_WRITE_GET_REPORT: libc::c_ulong = 0x4048_6742;
 
 const REPORT_DESCRIPTOR: &[u8; 531] = &[
     0x05, 0x01, 0x09, 0x05, 0xa1, 0x01, 0x85, 0x01, 0x09, 0x30, 0x09, 0x31, 0x09, 0x32, 0x09, 0x35,
@@ -78,6 +76,15 @@ pub struct DualShock4 {
     touch_timestamp: u8,
     rumble: (u16, u16),
     reported_rumble: (u16, u16),
+}
+
+#[repr(C)]
+struct HidReport {
+    report_id: u8,
+    userspace_req: u8,
+    length: u16,
+    data: [u8; 64],
+    padding: [u8; 4],
 }
 
 struct State {

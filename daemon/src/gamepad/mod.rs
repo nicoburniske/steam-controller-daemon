@@ -1,4 +1,4 @@
-mod dualshock4;
+pub mod dualshock4;
 mod xbox;
 
 use scd::Result;

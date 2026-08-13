@@ -23,11 +23,25 @@ use std::time::{Duration, Instant};
 struct Args {
     #[arg(long, default_value = "/run/scd/control.sock")]
     socket: PathBuf,
+    #[arg(long)]
+    setup_dualshock_gadget: bool,
+    #[arg(long)]
+    unbind_dualshock_gadget: bool,
 }
 
 fn main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
-    let Args { socket } = Args::parse();
+    let Args {
+        socket,
+        setup_dualshock_gadget,
+        unbind_dualshock_gadget,
+    } = Args::parse();
+    if setup_dualshock_gadget {
+        return gamepad::dualshock4::setup();
+    }
+    if unbind_dualshock_gadget {
+        return gamepad::dualshock4::unbind();
+    }
     let mut device = DeviceManager::new()?;
     let mut mapper = Mapper::empty();
     let mut mapped = Vec::new();
