@@ -3,7 +3,6 @@ mod gamepad;
 mod ipc;
 mod mapper;
 mod output;
-mod steam;
 
 use clap::Parser;
 use device::{DeviceEvent, DeviceManager};
@@ -31,12 +30,7 @@ fn main() -> Result<()> {
     let mut device = DeviceManager::new()?;
     let mut mapper = Mapper::empty();
     let mut mapped = Vec::new();
-    let gamepad = if device.steam_enabled() {
-        Gamepad::None
-    } else {
-        mapper.gamepad()
-    };
-    let mut outputs = Outputs::new(gamepad)?;
+    let mut outputs = Outputs::new(mapper.gamepad())?;
     let (mut ipc, commands) = Server::bind(socket)?;
     let mut keyboard = OskState::default();
     keyboard.set_bindings(mapper.osk_bindings());
@@ -55,7 +49,6 @@ fn main() -> Result<()> {
                 Request::Status => Response::Status {
                     status: Status {
                         connected: device.connected(),
-                        steam: device.steam_enabled(),
                         mode: mapper.active_mode().to_owned(),
                         battery_percent: battery,
                         charging,
@@ -114,40 +107,6 @@ fn main() -> Result<()> {
                     Err(error) => Response::Error {
                         message: error.to_string(),
                     },
-                },
-                Request::Steam { enabled } => match device.set_steam(*enabled) {
-                    Ok(()) => {
-                        if *enabled {
-                            rumble = (0, 0);
-                            mapper.release_all(&mut mapped);
-                            emit(
-                                &mut mapped,
-                                &mut mapper,
-                                &mut outputs,
-                                &device,
-                                &mut keyboard,
-                            )?;
-                            keyboard.set_visible(false);
-                            keyboard_closed_at = None;
-                            publish_keyboard(&mapper, &mut keyboard, &mut ipc);
-                        }
-                        outputs.set_gamepad(if *enabled {
-                            Gamepad::None
-                        } else {
-                            mapper.gamepad()
-                        })?;
-                        Response::Done
-                    }
-                    Err(error) => {
-                        outputs.set_gamepad(if device.steam_enabled() {
-                            Gamepad::None
-                        } else {
-                            mapper.gamepad()
-                        })?;
-                        Response::Error {
-                            message: error.to_string(),
-                        }
-                    }
                 },
                 Request::OskHide { session } => {
                     if *session == 0 || *session != keyboard.session() || !keyboard.visible {
@@ -266,23 +225,15 @@ fn main() -> Result<()> {
             }
         }
 
-        if device.connected()
-            && !device.steam_enabled()
-            && last_lizard_refresh.elapsed() >= Duration::from_secs(3)
-        {
+        if device.connected() && last_lizard_refresh.elapsed() >= Duration::from_secs(3) {
             device.suppress_lizard_mode()?;
             last_lizard_refresh = Instant::now();
         }
         if let Some(next) = outputs.poll_rumble()? {
             rumble = next;
-            if !device.steam_enabled() {
-                device.rumble(rumble.0, rumble.1)?;
-            }
+            device.rumble(rumble.0, rumble.1)?;
             last_rumble = Instant::now();
-        } else if !device.steam_enabled()
-            && rumble != (0, 0)
-            && last_rumble.elapsed() >= Duration::from_millis(40)
-        {
+        } else if rumble != (0, 0) && last_rumble.elapsed() >= Duration::from_millis(40) {
             device.rumble(rumble.0, rumble.1)?;
             last_rumble = Instant::now();
         }
@@ -311,11 +262,7 @@ fn emit(
         match output {
             Output::ModeChanged { name, haptic } => {
                 log::info!("active mode: {name}");
-                outputs.set_gamepad(if device.steam_enabled() {
-                    Gamepad::None
-                } else {
-                    mapper.gamepad()
-                })?;
+                outputs.set_gamepad(mapper.gamepad())?;
                 if let Some(haptic) = haptic {
                     device.play_haptic(haptic)?;
                 }

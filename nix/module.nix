@@ -8,15 +8,8 @@
   udevRules = pkgs.writeTextDir "lib/udev/rules.d/72-scd.rules" ''
     # expose the emulated wired controller to the graphical session
     SUBSYSTEM=="hidraw", KERNEL=="hidraw*", KERNELS=="0003:054C:09CC.*", TAG+="uaccess", GROUP:="input", MODE:="0660"
-    # reserve the physical receiver for scd unless it is handed to steam
-    SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="28de", ATTR{idProduct}=="1304", TAG-="uaccess", OWNER:="scd", GROUP:="scd-control", MODE:="0600"
-    TEST!="/run/scd/steam-device", SUBSYSTEM=="hidraw", KERNEL=="hidraw*", ATTRS{idVendor}=="28de", ATTRS{idProduct}=="1304", OWNER:="root", GROUP:="scd", MODE:="0660"
-    TEST!="/run/scd/steam-device", SUBSYSTEM=="tty", ATTRS{idVendor}=="28de", ATTRS{idProduct}=="1304", OWNER:="root", GROUP:="root", MODE:="0000"
-    TEST!="/run/scd/steam-device", SUBSYSTEM=="input", ATTRS{id/vendor}=="28de", ATTRS{id/product}=="1304", OWNER:="root", GROUP:="root", MODE:="0000", ENV{LIBINPUT_IGNORE_DEVICE}="1"
-  '';
-  # clear receiver ACLs added by the later uaccess rules
-  aclRules = pkgs.writeTextDir "lib/udev/rules.d/74-scd.rules" ''
-    ACTION!="remove", TEST!="/run/scd/steam-device", SUBSYSTEMS=="usb", ATTRS{idVendor}=="28de", ATTRS{idProduct}=="1304", ENV{DEVNAME}!="", TAG-="uaccess", RUN{program}+="${lib.getExe' pkgs.acl "setfacl"} --remove-all $env{DEVNAME}"
+    # allow scd to claim the physical receiver while it runs
+    SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="28de", ATTR{idProduct}=="1304", TAG+="uaccess", GROUP:="scd", MODE:="0660"
   '';
 in {
   options.services.scd = {
@@ -44,10 +37,7 @@ in {
     # provide the virtual usb host used by wired dualshock emulation
     boot.kernelModules = ["vhci_hcd"];
     hardware.uinput.enable = true;
-    services.udev.packages = [
-      udevRules
-      aclRules
-    ];
+    services.udev.packages = [udevRules];
     users = {
       groups = {
         scd = {};
@@ -82,8 +72,6 @@ in {
             "uinput"
           ];
           RuntimeDirectory = "scd";
-          # retain steam handoff state across service restarts
-          RuntimeDirectoryPreserve = "yes";
           RuntimeDirectoryMode = "0770";
           UMask = "0007";
           Restart = "on-failure";

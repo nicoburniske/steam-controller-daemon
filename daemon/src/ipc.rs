@@ -378,7 +378,6 @@ mod tests {
         assert!(matches!(command.request, Request::Status));
         let status = Status {
             connected: true,
-            steam: false,
             mode: "desktop".into(),
             battery_percent: Some(75),
             charging: Some(false),

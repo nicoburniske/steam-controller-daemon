@@ -20,6 +20,5 @@ expect rough edges and breaking changes
 - modes and hold layers
 - global button chords
 - haptic feedback
-- runtime Steam Input handoff
 - themable Wayland native on-screen keyboard
 - NixOS module

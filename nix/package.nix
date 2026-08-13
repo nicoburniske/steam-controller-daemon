@@ -1,8 +1,8 @@
 {
   lib,
+  libusb1,
   pkg-config,
   rustPlatform,
-  udev,
 }:
 rustPlatform.buildRustPackage {
   pname = "scd";
@@ -25,7 +25,7 @@ rustPlatform.buildRustPackage {
     outputHashes."blit-0.1.0" = "sha256-YAac7/WoiC/xNGz+KIOOaqEH6240ml7mvJPIJU6Ew9k=";
   };
   nativeBuildInputs = [pkg-config];
-  buildInputs = [udev];
+  buildInputs = [libusb1];
 
   RUSTC_BOOTSTRAP = "1";
   meta = {

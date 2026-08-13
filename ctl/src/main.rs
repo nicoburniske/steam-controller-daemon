@@ -27,10 +27,6 @@ enum Command {
         #[command(subcommand)]
         haptic: HapticCommand,
     },
-    Steam {
-        #[command(subcommand)]
-        action: SteamAction,
-    },
     Config {
         #[command(subcommand)]
         action: ConfigAction,
@@ -97,12 +93,6 @@ enum ModeAction {
     Next,
 }
 
-#[derive(Subcommand)]
-enum SteamAction {
-    Enable,
-    Disable,
-}
-
 fn main() -> scd::Result<()> {
     let args = Args::parse();
     let client = Client::new(args.socket);
@@ -113,7 +103,6 @@ fn main() -> scd::Result<()> {
         Command::Status { json: false } => {
             let status = client.status()?;
             println!("connected: {}", status.connected);
-            println!("steam: {}", status.steam);
             println!("mode: {}", status.mode);
             if let Some(device) = status.device {
                 println!("device: {device}");
@@ -170,12 +159,6 @@ fn main() -> scd::Result<()> {
                 client.play_haptic(Haptic::Script { script, gain })?
             }
         },
-        Command::Steam {
-            action: SteamAction::Enable,
-        } => client.set_steam(true)?,
-        Command::Steam {
-            action: SteamAction::Disable,
-        } => client.set_steam(false)?,
         Command::Config {
             action: ConfigAction::Apply { path },
         } => client.apply_config(fs::read_to_string(path)?)?,

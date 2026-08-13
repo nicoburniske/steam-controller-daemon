@@ -9,10 +9,10 @@ calloop = "0.14"
 clap.workspace = true
 env_logger.workspace = true
 evdev.workspace = true
-hidapi = { version = "2.6", default-features = false, features = ["linux-native-basic-udev"] }
 indexmap.workspace = true
 libc = "0.2"
 log.workspace = true
+rusb = "0.9"
 scd.workspace = true
 serde.workspace = true
 serde_json.workspace = true
