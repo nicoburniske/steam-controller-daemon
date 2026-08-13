@@ -42,7 +42,7 @@ pub struct Transport {
 }
 
 impl Transport {
-    pub fn new(report_descriptor: &'static [u8], report: [u8; 64]) -> io::Result<Self> {
+    pub fn new(report: [u8; 64]) -> io::Result<Self> {
         let (shutdown_socket, attached_socket) = UnixStream::pair()?;
         let mut worker_socket = shutdown_socket.try_clone()?;
         let port = attach(attached_socket.as_raw_fd())?;
@@ -55,12 +55,9 @@ impl Transport {
         let worker = match thread::Builder::new()
             .name("scd-ds4-usbip".into())
             .spawn(move || {
-                serve(
-                    &mut worker_socket,
-                    report_descriptor,
-                    &worker_report,
-                    &worker_rumble,
-                )
+                let result = serve(&mut worker_socket, &worker_report, &worker_rumble);
+                let _ = worker_socket.shutdown(std::net::Shutdown::Both);
+                result
             }) {
             Ok(worker) => worker,
             Err(error) => {
@@ -166,7 +163,6 @@ fn detach(port: u16) -> io::Result<()> {
 
 fn serve(
     socket: &mut UnixStream,
-    report_descriptor: &[u8],
     report: &Mutex<[u8; 64]>,
     rumble: &Mutex<(u16, u16)>,
 ) -> io::Result<()> {
@@ -194,7 +190,7 @@ fn serve(
             write_reply(socket, USBIP_RET_UNLINK, header, 0, &[])?;
             continue;
         }
-        if command != USBIP_CMD_SUBMIT || devid != DEVID {
+        if command != USBIP_CMD_SUBMIT {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "invalid USB/IP request",
@@ -203,10 +199,10 @@ fn serve(
 
         let length = u32::from_be_bytes(request[24..28].try_into().unwrap()) as usize;
         let packet_count = u32::from_be_bytes(request[32..36].try_into().unwrap());
-        if !matches!(packet_count, 0 | u32::MAX) || length > 4096 {
+        if length > 4096 {
             return Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "unsupported USB/IP transfer",
+                io::ErrorKind::InvalidData,
+                "oversized USB/IP transfer",
             ));
         }
         let mut output = vec![];
@@ -215,8 +211,19 @@ fn serve(
             socket.read_exact(&mut output)?;
         }
 
-        let result = if endpoint == 0 {
-            control(&request[40..48], &output, report_descriptor, rumble)
+        if devid != DEVID || !matches!(packet_count, 0 | u32::MAX) {
+            write_error(socket, header, libc::EINVAL)?;
+        } else if endpoint == 0 {
+            match control(&request[40..48], &output, rumble) {
+                Ok(data) => write_reply(
+                    socket,
+                    USBIP_RET_SUBMIT,
+                    header,
+                    if direction == 0 { length } else { data.len() },
+                    &data,
+                )?,
+                Err(errno) => write_error(socket, header, errno)?,
+            }
         } else if endpoint == 4 && direction == 1 {
             next_input += Duration::from_millis(5);
             if let Some(delay) = next_input.checked_duration_since(Instant::now()) {
@@ -227,35 +234,20 @@ fn serve(
             let mut input = *report.lock().unwrap();
             input[7] = (input[7] & 0x03) | ((counter & 0x3f) << 2);
             counter = counter.wrapping_add(1) & 0x3f;
-            Ok(input[..input.len().min(length)].to_vec())
+            let input = &input[..input.len().min(length)];
+            write_reply(socket, USBIP_RET_SUBMIT, header, input.len(), input)?;
         } else if endpoint == 3 && direction == 0 {
             if let Some(value) = parse_output(&output) {
                 *rumble.lock().unwrap() = value;
             }
-            Ok(vec![])
+            write_reply(socket, USBIP_RET_SUBMIT, header, length, &[])?;
         } else {
-            Err(libc::EPIPE)
-        };
-
-        match result {
-            Ok(data) => write_reply(
-                socket,
-                USBIP_RET_SUBMIT,
-                header,
-                if direction == 0 { length } else { data.len() },
-                &data,
-            )?,
-            Err(errno) => write_error(socket, header, errno)?,
+            write_error(socket, header, libc::EPIPE)?;
         }
     }
 }
 
-fn control(
-    setup: &[u8],
-    output: &[u8],
-    report_descriptor: &[u8],
-    rumble: &Mutex<(u16, u16)>,
-) -> Result<Vec<u8>, i32> {
+fn control(setup: &[u8], output: &[u8], rumble: &Mutex<(u16, u16)>) -> Result<Vec<u8>, i32> {
     let request_type = setup[0];
     let request = setup[1];
     let value = u16::from_le_bytes(setup[2..4].try_into().unwrap());
@@ -265,12 +257,18 @@ fn control(
         (0x80, 6) if value >> 8 == 2 => CONFIGURATION_DESCRIPTOR.to_vec(),
         (0x80, 6) if value >> 8 == 3 => string_descriptor(value as u8).ok_or(libc::EPIPE)?,
         (0x81, 6) if value >> 8 == 0x21 => CONFIGURATION_DESCRIPTOR[18..27].to_vec(),
-        (0x81, 6) if value >> 8 == 0x22 => report_descriptor.to_vec(),
+        (0x81, 6) if value >> 8 == 0x22 => super::REPORT_DESCRIPTOR.to_vec(),
         (0x80, 0) | (0x81, 0) | (0x82, 0) => vec![0, 0],
         (0x80, 8) => vec![1],
         (0x81, 10) => vec![0],
         (0x00, 5 | 9) | (0x01, 11) | (0x02, 1) => vec![],
-        (0xa1, 1) => feature_report(value as u8).ok_or(libc::EPIPE)?.to_vec(),
+        (0xa1, 1) => match value as u8 {
+            0x02 => super::CALIBRATION.as_slice(),
+            0x12 => super::PAIRING.as_slice(),
+            0xa3 => super::FIRMWARE.as_slice(),
+            _ => return Err(libc::EPIPE),
+        }
+        .to_vec(),
         (0xa1, 2 | 3) => vec![0],
         (0x21, 9) => {
             if value as u8 == 0x05 {
@@ -351,15 +349,6 @@ fn parse_output(report: &[u8]) -> Option<(u16, u16)> {
         .then(|| (u16::from(report[5]) * 257, u16::from(report[4]) * 257))
 }
 
-fn feature_report(id: u8) -> Option<&'static [u8]> {
-    match id {
-        0x02 => Some(super::dualshock4::CALIBRATION),
-        0x12 => Some(super::dualshock4::PAIRING),
-        0xa3 => Some(super::dualshock4::FIRMWARE),
-        _ => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -392,20 +381,20 @@ mod tests {
     fn answers_enumeration_and_hid_control_requests() {
         let rumble = Mutex::new((0, 0));
         assert_eq!(
-            control(&[0x80, 6, 0, 1, 0, 0, 18, 0], &[], &[], &rumble).unwrap(),
+            control(&[0x80, 6, 0, 1, 0, 0, 18, 0], &[], &rumble).unwrap(),
             DEVICE_DESCRIPTOR
         );
         assert_eq!(
-            control(&[0x80, 6, 0, 2, 0, 0, 9, 0], &[], &[], &rumble).unwrap(),
+            control(&[0x80, 6, 0, 2, 0, 0, 9, 0], &[], &rumble).unwrap(),
             CONFIGURATION_DESCRIPTOR[..9]
         );
         assert_eq!(
-            control(&[0xa1, 1, 2, 3, 0, 0, 37, 0], &[], &[], &rumble).unwrap(),
-            super::super::dualshock4::CALIBRATION
+            control(&[0xa1, 1, 2, 3, 0, 0, 37, 0], &[], &rumble).unwrap(),
+            super::super::CALIBRATION
         );
         assert_eq!(
-            control(&[0xa1, 1, 0x12, 3, 0, 0, 16, 0], &[], &[], &rumble).unwrap(),
-            super::super::dualshock4::PAIRING
+            control(&[0xa1, 1, 0x12, 3, 0, 0, 16, 0], &[], &rumble).unwrap(),
+            super::super::PAIRING
         );
     }
 
@@ -418,7 +407,7 @@ mod tests {
         report[4] = 0x12;
         report[5] = 0x34;
         assert_eq!(
-            control(&[0x21, 9, 5, 2, 0, 0, 32, 0], &report, &[], &rumble),
+            control(&[0x21, 9, 5, 2, 0, 0, 32, 0], &report, &rumble),
             Ok(vec![])
         );
         assert_eq!(*rumble.lock().unwrap(), (0x3434, 0x1212));

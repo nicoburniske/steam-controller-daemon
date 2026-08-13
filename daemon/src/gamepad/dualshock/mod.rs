@@ -1,11 +1,15 @@
 //! wired DualShock 4 v2 presented through local USB/IP and `vhci_hcd`
 
+mod usbip;
+
 use scd::Result;
 use scd::config::GamepadButton;
 use scd::protocol::{ControllerState, Trackpad};
 
-use crate::gamepad::usbip::Transport;
 use crate::mapper::GamepadAxis;
+
+use usbip::Transport;
+
 
 // hid-tools PS4ControllerUSB descriptor
 const REPORT_DESCRIPTOR: &[u8; 507] = &[
@@ -43,15 +47,15 @@ const REPORT_DESCRIPTOR: &[u8; 507] = &[
     0xb1, 0x02, 0x85, 0xd4, 0x09, 0x59, 0x95, 0x3f, 0xb1, 0x02, 0xc0,
 ];
 
-pub(super) const CALIBRATION: &[u8; 37] = &[
+const CALIBRATION: &[u8; 37] = &[
     0x02, 0x1e, 0x00, 0x05, 0x00, 0xe2, 0xff, 0xf2, 0x22, 0x4f, 0xdd, 0xbe, 0x22, 0x4d, 0xdd, 0x8d,
     0x22, 0x39, 0xdd, 0x1c, 0x02, 0x1c, 0x02, 0xe3, 0x1f, 0x8b, 0xdf, 0x8c, 0x1e, 0xb4, 0xde, 0x30,
     0x20, 0x71, 0xe0, 0x10, 0x00,
 ];
-pub(super) const PAIRING: &[u8; 16] = &[
+const PAIRING: &[u8; 16] = &[
     0x12, 0x8b, 0x09, 0x07, 0x6d, 0x66, 0x1c, 0, 0, 0, 0, 0, 0, 0, 0, 0,
 ];
-pub(super) const FIRMWARE: &[u8; 49] = &[
+const FIRMWARE: &[u8; 49] = &[
     0xa3, 0x41, 0x70, 0x72, 0x20, 0x20, 0x38, 0x20, 0x32, 0x30, 0x31, 0x34, 0, 0, 0, 0, 0, 0x30,
     0x39, 0x3a, 0x34, 0x36, 0x3a, 0x30, 0x36, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0x43, 3, 0, 0, 0,
     0x51, 0, 5, 0, 0, 0x80, 3, 0,
@@ -107,7 +111,7 @@ impl Default for State {
 impl DualShock4 {
     pub fn new() -> Result<Self> {
         let state = State::default();
-        let transport = Transport::new(REPORT_DESCRIPTOR, state.usb_report(0))?;
+        let transport = Transport::new(state.usb_report(0))?;
         log::info!(
             "created wired DualShock 4 054c:09cc with {}-byte descriptor",
             REPORT_DESCRIPTOR.len()
