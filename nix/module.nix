@@ -6,8 +6,8 @@
 }: let
   cfg = config.services.scd;
   udevRules = pkgs.writeTextDir "lib/udev/rules.d/72-scd.rules" ''
-    KERNEL=="hidg0", OWNER:="scd", GROUP:="scd", MODE:="0660"
-    SUBSYSTEM=="hidraw", KERNEL=="hidraw*", KERNELS=="0003:054C:0BA0.*", TAG+="uaccess", GROUP:="input", MODE:="0660"
+    KERNEL=="uhid", OWNER:="root", GROUP:="scd", MODE:="0660"
+    SUBSYSTEM=="hidraw", KERNEL=="hidraw*", KERNELS=="0005:054C:09CC.*", TAG+="uaccess", GROUP:="input", MODE:="0660"
     SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="28de", ATTR{idProduct}=="1304", TAG-="uaccess", OWNER:="scd", GROUP:="scd-control", MODE:="0600"
     TEST!="/run/scd/steam-device", SUBSYSTEM=="hidraw", KERNEL=="hidraw*", ATTRS{idVendor}=="28de", ATTRS{idProduct}=="1304", OWNER:="root", GROUP:="scd", MODE:="0660"
     TEST!="/run/scd/steam-device", SUBSYSTEM=="tty", ATTRS{idVendor}=="28de", ATTRS{idProduct}=="1304", OWNER:="root", GROUP:="root", MODE:="0000"
@@ -40,10 +40,7 @@ in {
   };
   config = lib.mkIf cfg.enable {
     environment.systemPackages = [cfg.package];
-    boot.kernelModules = [
-      "dummy_hcd"
-      "usb_f_hid"
-    ];
+    boot.kernelModules = ["uhid"];
     hardware.uinput.enable = true;
     services.udev.packages = [
       udevRules
@@ -63,16 +60,10 @@ in {
       services.scd = {
         description = "Steam Controller daemon";
         wantedBy = ["multi-user.target"];
-        after = ["systemd-modules-load.service"];
-        unitConfig.RequiresMountsFor = "/sys/kernel/config";
+        after = ["systemd-udevd.service"];
         serviceConfig = {
-          ExecStartPre = [
-            "+${pkgs.systemd}/bin/udevadm trigger --settle --action=change --property-match=ID_VENDOR_ID=28de --property-match=ID_MODEL_ID=1304"
-            "+${lib.getExe' cfg.package "scd"} --setup-dualshock-gadget"
-            "+${pkgs.coreutils}/bin/chown scd:scd /sys/kernel/config/usb_gadget/scd-dualshock/UDC"
-          ];
+          ExecStartPre = "+${pkgs.systemd}/bin/udevadm trigger --settle --action=change --property-match=ID_VENDOR_ID=28de --property-match=ID_MODEL_ID=1304";
           ExecStart = "${lib.getExe' cfg.package "scd"} --socket /run/scd/control.sock";
-          ExecStopPost = "+${lib.getExe' cfg.package "scd"} --unbind-dualshock-gadget";
           User = "scd";
           Group = "scd-control";
           SupplementaryGroups = [

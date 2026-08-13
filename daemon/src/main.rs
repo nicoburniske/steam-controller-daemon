@@ -23,25 +23,11 @@ use std::time::{Duration, Instant};
 struct Args {
     #[arg(long, default_value = "/run/scd/control.sock")]
     socket: PathBuf,
-    #[arg(long)]
-    setup_dualshock_gadget: bool,
-    #[arg(long)]
-    unbind_dualshock_gadget: bool,
 }
 
 fn main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
-    let Args {
-        socket,
-        setup_dualshock_gadget,
-        unbind_dualshock_gadget,
-    } = Args::parse();
-    if setup_dualshock_gadget {
-        return gamepad::setup_dualshock_gadget();
-    }
-    if unbind_dualshock_gadget {
-        return gamepad::unbind_dualshock_gadget();
-    }
+    let Args { socket } = Args::parse();
     let mut device = DeviceManager::new()?;
     let mut mapper = Mapper::empty();
     let mut mapped = Vec::new();
@@ -280,6 +266,7 @@ fn main() -> Result<()> {
             }
         }
 
+        outputs.tick(Instant::now())?;
         if device.connected()
             && !device.steam_enabled()
             && last_lizard_refresh.elapsed() >= Duration::from_secs(3)
@@ -338,7 +325,7 @@ fn emit(
             output => outputs.emit(&output)?,
         }
     }
-    outputs.sync_gamepad()
+    Ok(())
 }
 
 fn sync_keyboard(mapper: &Mapper, keyboard: &mut OskState) {

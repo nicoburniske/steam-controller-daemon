@@ -186,11 +186,10 @@ impl Outputs {
         }
     }
 
-    pub fn sync_gamepad(&mut self) -> Result<()> {
-        match &mut self.gamepad {
-            Some(VirtualGamepad::DualShock4(gamepad)) => gamepad.sync(),
-            _ => Ok(()),
-        }
+    pub fn tick(&mut self, now: std::time::Instant) -> Result<()> {
+        self.gamepad
+            .as_mut()
+            .map_or(Ok(()), |gamepad| gamepad.tick(now))
     }
 
     fn emit_relative(

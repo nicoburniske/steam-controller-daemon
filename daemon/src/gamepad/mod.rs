@@ -9,14 +9,6 @@ use crate::mapper::GamepadAxis;
 use dualshock4::DualShock4;
 use xbox::Xbox;
 
-pub fn setup_dualshock_gadget() -> Result<()> {
-    dualshock4::setup()
-}
-
-pub fn unbind_dualshock_gadget() -> Result<()> {
-    dualshock4::unbind()
-}
-
 pub enum VirtualGamepad {
     Xbox(Xbox),
     DualShock4(DualShock4),
@@ -55,6 +47,13 @@ impl VirtualGamepad {
         match self {
             Self::Xbox(gamepad) => gamepad.poll_rumble(),
             Self::DualShock4(gamepad) => gamepad.poll_rumble(),
+        }
+    }
+
+    pub fn tick(&mut self, now: std::time::Instant) -> Result<()> {
+        match self {
+            Self::Xbox(_) => Ok(()),
+            Self::DualShock4(gamepad) => gamepad.tick(now),
         }
     }
 }
