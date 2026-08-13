@@ -19,14 +19,35 @@ macro_rules! one_of {
     };
 }
 
-macro_rules! required_properties {
-    ($node:expr, $($name:literal),+ $(,)?) => {{
-        $crate::kdl::properties($node, &[$($name),+])?;
-        Ok::<_, $crate::kdl::Issue>(($($crate::kdl::property($node, $name)?),+,))
-    }};
+macro_rules! props {
+    ($node:expr, $($kind:ident)? $name:literal $(= $default:expr)? $(,)?) => {
+        {
+            let node = $node;
+            $crate::kdl::properties(node, &[$name]).and_then(|()| {
+                $crate::kdl::props!(@get node, $($kind)? $name $(= $default)?)
+            })
+        }
+    };
+    ($node:expr, $($( $kind:ident)? $name:literal $(= $default:expr)?),+ $(,)?) => {
+        {
+            let node = $node;
+            $crate::kdl::properties(node, &[$($name),+]).and_then(|()| {
+                Ok::<_, $crate::kdl::Issue>(($($crate::kdl::props!(@get node, $($kind)? $name $(= $default)?)?),+,))
+            })
+        }
+    };
+    (@get $node:ident, $name:literal) => {
+        $crate::kdl::property($node, $name)
+    };
+    (@get $node:ident, optional $name:literal) => {
+        $crate::kdl::optional_property($node, $name)
+    };
+    (@get $node:ident, $name:literal = $default:expr) => {
+        $crate::kdl::optional_property($node, $name).map(|value| value.unwrap_or_else(|| $default))
+    };
 }
 
-pub(crate) use {one_of, required_properties};
+pub(crate) use {one_of, props};
 
 pub trait Span {
     fn span(&self) -> SourceSpan;

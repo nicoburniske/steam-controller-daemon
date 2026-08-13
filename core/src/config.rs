@@ -7,7 +7,7 @@ use miette::{Diagnostic, LabeledSpan, NamedSource, SourceCode};
 use crate::{
     kdl::{
         Issue as ConfigIssue, KdlDocument, KdlNode, argument, arguments, children, issue, one_of,
-        optional_property, properties, required_properties, single,
+        properties, props, single,
     },
     protocol::{Button, Buttons, Haptic, Trackpad},
 };
@@ -250,12 +250,7 @@ impl Config {
             .map(parse_haptic)
             .transpose()?;
         let trackpad = single(document, "trackpad")?;
-        let click_pressure = if let Some(node) = trackpad {
-            properties(node, &["click-pressure"])?;
-            optional_property(node, "click-pressure")?.unwrap_or(25)
-        } else {
-            25
-        };
+        let click_pressure = trackpad.map_or(Ok(25), |node| props!(node, "click-pressure" = 25))?;
         let osk = single(document, "osk")?;
         let global = single(document, "global")?;
 
@@ -291,7 +286,6 @@ impl Config {
             .filter(|node| node.name().value() == "mode")
             .enumerate()
         {
-            properties(node, &["gamepad", "touchpad"])?;
             let name: &str = argument(node, 0)?;
             if name.trim().is_empty() {
                 error.push(issue(node, "mode names must not be empty"));
@@ -376,167 +370,7 @@ impl Config {
             .iter()
             .filter(|node| node.name().value() == "mode")
         {
-            let name: &str = argument(node, 0)?;
-            let gamepad = one_of!(
-                node,
-                optional_property(node, "gamepad")?.unwrap_or("none"),
-                "gamepad",
-                {
-                    "none" => Gamepad::None,
-                    "xbox" => Gamepad::Xbox,
-                    "dualshock4" => Gamepad::DualShock4,
-                }
-            )?;
-            let gamepad_touchpad = optional_property(node, "touchpad")?
-                .map(|value| parse_trackpad(value, node))
-                .transpose()?;
-            let mut bindings = Vec::new();
-            let mut axes = Vec::new();
-            let mut layers = Vec::new();
-            let mut layer_holds = Buttons::default();
-            let mode_children = children(node);
-
-            for (child_position, child) in mode_children.iter().enumerate() {
-                one_of!(child, child.name().value(), "mode child", {
-                    "bind" => {
-                        let index = bindings.len();
-                        let Some((inputs, trigger, action)) =
-                            error.append(parse_binding(child, &mode_names, false))
-                        else {
-                            continue;
-                        };
-                        if bindings.iter().any(|binding: &Binding| {
-                            binding.inputs == inputs && binding.trigger == trigger
-                        }) {
-                            error.push(issue(
-                                child,
-                                format!(
-                                    "mode {name:?} binding {index} duplicates an earlier input"
-                                ),
-                            ));
-                        }
-                        bindings.push(Binding {
-                            inputs,
-                            trigger,
-                            action: match action {
-                                GlobalAction::Action(action) => action,
-                                GlobalAction::KeyboardToggle => unreachable!(),
-                            },
-                        });
-                    },
-                    "axis" => {
-                        let index = axes.len();
-                        let Some(axis) = error.append(parse_axis(child)) else {
-                            continue;
-                        };
-                        if axes
-                            .iter()
-                            .any(|earlier| duplicate_axis_target(*earlier, axis))
-                        {
-                            error.push(issue(
-                                child,
-                                format!("mode {name:?} axis mapping {index} duplicates target"),
-                            ));
-                        }
-                        axes.push(axis);
-                    },
-                    "layer" => {
-                        let layer_name: &str = argument(child, 0)?;
-                        let (hold,) = required_properties!(child, "hold")?;
-                        let hold = parse_button(hold, child)?;
-                        if layer_name.trim().is_empty() {
-                            error.push(issue(
-                                child,
-                                format!("mode {name:?} layer names must not be empty"),
-                            ));
-                        }
-                        if mode_children[..child_position].iter().any(|earlier| {
-                            earlier.name().value() == "layer"
-                                && earlier.entry(0).and_then(|entry| entry.value().as_string())
-                                    == Some(layer_name)
-                        }) {
-                            error.push(issue(
-                                child,
-                                format!(
-                                    "mode {name:?} layer {layer_name:?} duplicates an earlier layer"
-                                ),
-                            ));
-                        }
-                        if layer_holds.contains(hold) {
-                            error.push(issue(
-                                child,
-                                format!(
-                                    "mode {name:?} layer {layer_name:?} hold conflicts with an earlier layer"
-                                ),
-                            ));
-                        }
-                        layer_holds.insert(hold);
-                        let mut layer_bindings = Vec::new();
-                        for (index, binding) in children(child).iter().enumerate() {
-                            let Some((inputs, trigger, action)) =
-                                error.append(parse_binding(binding, &mode_names, false))
-                            else {
-                                continue;
-                            };
-                            if inputs.contains(hold) {
-                                error.push(issue(
-                                        binding,
-                                        format!(
-                                            "mode {name:?} layer {layer_name:?} binding {index} must not use its hold button"
-                                        ),
-                                    ));
-                            }
-                            if layer_bindings.iter().any(|binding: &Binding| {
-                                binding.inputs == inputs && binding.trigger == trigger
-                            }) {
-                                error.push(issue(
-                                        binding,
-                                        format!(
-                                            "mode {name:?} layer {layer_name:?} binding {index} duplicates an earlier input"
-                                        ),
-                                    ));
-                            }
-                            layer_bindings.push(Binding {
-                                inputs,
-                                trigger,
-                                action: match action {
-                                    GlobalAction::Action(action) => action,
-                                    GlobalAction::KeyboardToggle => unreachable!(),
-                                },
-                            });
-                        }
-                        layers.push(Layer {
-                            hold,
-                            bindings: layer_bindings,
-                        });
-                    },
-                })?;
-            }
-            for (layer_node, layer) in mode_children
-                .iter()
-                .filter(|node| node.name().value() == "layer")
-                .zip(&layers)
-            {
-                if bindings
-                    .iter()
-                    .any(|binding| binding.inputs.contains(layer.hold))
-                {
-                    let layer_name: &str = argument(layer_node, 0)?;
-                    error.push(issue(
-                        layer_node,
-                        format!(
-                            "mode {name:?} layer {layer_name:?} hold must not also be a mode binding"
-                        ),
-                    ));
-                }
-            }
-            modes.push(Mode {
-                gamepad,
-                gamepad_touchpad,
-                bindings,
-                axes,
-                layers,
-            });
+            modes.push(parse_mode(node, &mode_names, &mut error)?);
         }
 
         if !error.issues.is_empty() {
@@ -572,6 +406,165 @@ impl Config {
     pub fn next_mode(&self, mode: ModeId) -> ModeId {
         ModeId((mode.0 + 1) % self.modes.len())
     }
+}
+
+fn parse_mode(
+    node: &KdlNode,
+    mode_names: &IndexMap<String, ModeId>,
+    error: &mut ConfigError,
+) -> Result<Mode, ConfigIssue> {
+    let name: &str = argument(node, 0)?;
+    let (gamepad, touchpad): (&str, Option<&str>) =
+        props!(node, "gamepad" = "none", optional "touchpad")?;
+    let gamepad = one_of!(node, gamepad, "gamepad", {
+        "none" => Gamepad::None,
+        "xbox" => Gamepad::Xbox,
+        "dualshock4" => Gamepad::DualShock4,
+    })?;
+    let gamepad_touchpad = touchpad
+        .map(|value| parse_trackpad(value, node))
+        .transpose()?;
+    let mut bindings = Vec::new();
+    let mut axes = Vec::new();
+    let mut layers = Vec::new();
+    let mut layer_holds = Buttons::default();
+    let mode_children = children(node);
+
+    for (child_position, child) in mode_children.iter().enumerate() {
+        one_of!(child, child.name().value(), "mode child", {
+            "bind" => {
+                let index = bindings.len();
+                let Some((inputs, trigger, action)) =
+                    error.append(parse_binding(child, mode_names, false))
+                else {
+                    continue;
+                };
+                if bindings.iter().any(|binding: &Binding| {
+                    binding.inputs == inputs && binding.trigger == trigger
+                }) {
+                    error.push(issue(
+                        child,
+                        format!("mode {name:?} binding {index} duplicates an earlier input"),
+                    ));
+                }
+                bindings.push(Binding {
+                    inputs,
+                    trigger,
+                    action: match action {
+                        GlobalAction::Action(action) => action,
+                        GlobalAction::KeyboardToggle => unreachable!(),
+                    },
+                });
+            },
+            "axis" => {
+                let index = axes.len();
+                let Some(axis) = error.append(parse_axis(child)) else {
+                    continue;
+                };
+                if axes
+                    .iter()
+                    .any(|earlier| duplicate_axis_target(*earlier, axis))
+                {
+                    error.push(issue(
+                        child,
+                        format!("mode {name:?} axis mapping {index} duplicates target"),
+                    ));
+                }
+                axes.push(axis);
+            },
+            "layer" => {
+                let layer_name: &str = argument(child, 0)?;
+                let hold: &str = props!(child, "hold")?;
+                let hold = parse_button(hold, child)?;
+                if layer_name.trim().is_empty() {
+                    error.push(issue(
+                        child,
+                        format!("mode {name:?} layer names must not be empty"),
+                    ));
+                }
+                if mode_children[..child_position].iter().any(|earlier| {
+                    earlier.name().value() == "layer"
+                        && earlier.entry(0).and_then(|entry| entry.value().as_string())
+                            == Some(layer_name)
+                }) {
+                    error.push(issue(
+                        child,
+                        format!("mode {name:?} layer {layer_name:?} duplicates an earlier layer"),
+                    ));
+                }
+                if layer_holds.contains(hold) {
+                    error.push(issue(
+                        child,
+                        format!(
+                            "mode {name:?} layer {layer_name:?} hold conflicts with an earlier layer"
+                        ),
+                    ));
+                }
+                layer_holds.insert(hold);
+                let mut layer_bindings = Vec::new();
+                for (index, binding) in children(child).iter().enumerate() {
+                    let Some((inputs, trigger, action)) =
+                        error.append(parse_binding(binding, mode_names, false))
+                    else {
+                        continue;
+                    };
+                    if inputs.contains(hold) {
+                        error.push(issue(
+                            binding,
+                            format!(
+                                "mode {name:?} layer {layer_name:?} binding {index} must not use its hold button"
+                            ),
+                        ));
+                    }
+                    if layer_bindings.iter().any(|binding: &Binding| {
+                        binding.inputs == inputs && binding.trigger == trigger
+                    }) {
+                        error.push(issue(
+                            binding,
+                            format!(
+                                "mode {name:?} layer {layer_name:?} binding {index} duplicates an earlier input"
+                            ),
+                        ));
+                    }
+                    layer_bindings.push(Binding {
+                        inputs,
+                        trigger,
+                        action: match action {
+                            GlobalAction::Action(action) => action,
+                            GlobalAction::KeyboardToggle => unreachable!(),
+                        },
+                    });
+                }
+                layers.push(Layer {
+                    hold,
+                    bindings: layer_bindings,
+                });
+            },
+        })?;
+    }
+    for (layer_node, layer) in mode_children
+        .iter()
+        .filter(|node| node.name().value() == "layer")
+        .zip(&layers)
+    {
+        if bindings
+            .iter()
+            .any(|binding| binding.inputs.contains(layer.hold))
+        {
+            let layer_name: &str = argument(layer_node, 0)?;
+            error.push(issue(
+                layer_node,
+                format!("mode {name:?} layer {layer_name:?} hold must not also be a mode binding"),
+            ));
+        }
+    }
+    Ok(Mode {
+        gamepad,
+        gamepad_touchpad,
+        bindings,
+        axes,
+        layers,
+    })
 }
 
 impl fmt::Display for ConfigError {
@@ -694,19 +687,6 @@ fn parse_binding(
 }
 
 fn parse_axis(node: &KdlNode) -> Result<AxisMapping, ConfigIssue> {
-    properties(
-        node,
-        &[
-            "deadzone",
-            "sensitivity",
-            "acceleration",
-            "curve",
-            "exponent",
-            "invert-x",
-            "invert-y",
-            "swap-xy",
-        ],
-    )?;
     let source: &str = argument(node, 0)?;
     let target: &str = argument(node, 1)?;
     let scalar_source = matches!(source, "left-trigger" | "right-trigger");
@@ -732,8 +712,7 @@ fn parse_axis(node: &KdlNode) -> Result<AxisMapping, ConfigIssue> {
                         "left-trigger" => Trigger::Left,
                         "right-trigger" => Trigger::Right,
                     })?;
-                    let (engage, release): (f32, f32) =
-                        required_properties!(child, "engage", "release")?;
+                    let (engage, release): (f32, f32) = props!(child, "engage", "release")?;
                     if !engage.is_finite()
                         || !release.is_finite()
                         || release < 0.0
@@ -793,10 +772,17 @@ fn parse_axis(node: &KdlNode) -> Result<AxisMapping, ConfigIssue> {
             "axis mapping components is only valid for a gyro source",
         ));
     }
-    let deadzone: f32 = optional_property(node, "deadzone")?.unwrap_or(0.0);
-    let sensitivity: f32 = optional_property(node, "sensitivity")?.unwrap_or(1.0);
-    let acceleration: Option<f32> = optional_property(node, "acceleration")?;
-    let exponent: f32 = optional_property(node, "exponent")?.unwrap_or(2.0);
+    let (deadzone, sensitivity, acceleration, curve, exponent, invert_x, invert_y, swap_xy) = props!(
+        node,
+        "deadzone" = 0.0_f32,
+        "sensitivity" = 1.0_f32,
+        optional "acceleration",
+        "curve" = "linear",
+        "exponent" = 2.0_f32,
+        "invert-x" = false,
+        "invert-y" = false,
+        "swap-xy" = false,
+    )?;
     if !deadzone.is_finite() || !(0.0..1.0).contains(&deadzone) {
         return Err(issue(
             node,
@@ -810,6 +796,7 @@ fn parse_axis(node: &KdlNode) -> Result<AxisMapping, ConfigIssue> {
         ));
     }
     if let Some(value) = acceleration {
+        let value: f32 = value;
         if !value.is_finite() || value < 0.0 {
             return Err(issue(
                 node,
@@ -831,7 +818,7 @@ fn parse_axis(node: &KdlNode) -> Result<AxisMapping, ConfigIssue> {
     }
     let exponent = one_of!(
         node,
-        optional_property(node, "curve")?.unwrap_or("linear"),
+        curve,
         "axis curve",
         {
             "linear" => 1.0,
@@ -867,9 +854,9 @@ fn parse_axis(node: &KdlNode) -> Result<AxisMapping, ConfigIssue> {
     })?;
     let options = VectorOptions {
         axis: options,
-        invert_x: optional_property(node, "invert-x")?.unwrap_or(false),
-        invert_y: optional_property(node, "invert-y")?.unwrap_or(false),
-        swap_xy: optional_property(node, "swap-xy")?.unwrap_or(false),
+        invert_x,
+        invert_y,
+        swap_xy,
     };
     one_of!(node, source, "axis source", {
         "left-stick" | "right-stick" => AxisMapping::Stick {
@@ -950,22 +937,26 @@ fn parse_haptic(node: &KdlNode) -> Result<Haptic, ConfigIssue> {
     one_of!(node, node.name().value(), "haptic", {
         "rumble" => {
             let (low_frequency, high_frequency) =
-                required_properties!(node, "low-frequency", "high-frequency")?;
+                props!(node, "low-frequency", "high-frequency")?;
             Haptic::Rumble {
                 low_frequency,
                 high_frequency,
             }
         },
         "trackpad-click" => {
-            let (gain,) = required_properties!(node, "gain")?;
+            let gain = props!(node, "gain")?;
             Haptic::TrackpadClick {
                 trackpad: parse_trackpad(argument(node, 0)?, node)?,
                 gain,
             }
         },
         "pulse" => {
-            let (on_us, off_us, repeat) =
-                required_properties!(node, "on-us", "off-us", "repeat")?;
+            let (on_us, off_us, repeat) = props!(
+                node,
+                "on-us",
+                "off-us",
+                "repeat",
+            )?;
             Haptic::Pulse {
                 on_us,
                 off_us,
@@ -973,8 +964,12 @@ fn parse_haptic(node: &KdlNode) -> Result<Haptic, ConfigIssue> {
             }
         },
         "tone" => {
-            let (gain, frequency, duration_ms) =
-                required_properties!(node, "gain", "frequency", "duration-ms")?;
+            let (gain, frequency, duration_ms) = props!(
+                node,
+                "gain",
+                "frequency",
+                "duration-ms",
+            )?;
             Haptic::Tone {
                 gain,
                 frequency,
@@ -982,7 +977,7 @@ fn parse_haptic(node: &KdlNode) -> Result<Haptic, ConfigIssue> {
             }
         },
         "sweep" => {
-            let (gain, duration_ms, start_frequency, end_frequency) = required_properties!(
+            let (gain, duration_ms, start_frequency, end_frequency) = props!(
                 node,
                 "gain",
                 "duration-ms",
@@ -997,7 +992,7 @@ fn parse_haptic(node: &KdlNode) -> Result<Haptic, ConfigIssue> {
             }
         },
         "script" => {
-            let (gain,) = required_properties!(node, "gain")?;
+            let gain = props!(node, "gain")?;
             Haptic::Script {
                 script: argument(node, 0)?,
                 gain,
