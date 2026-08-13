@@ -42,7 +42,6 @@ in {
     environment.systemPackages = [cfg.package];
     boot.kernelModules = [
       "dummy_hcd"
-      "libcomposite"
       "usb_f_hid"
     ];
     hardware.uinput.enable = true;
@@ -64,12 +63,8 @@ in {
       services.scd = {
         description = "Steam Controller daemon";
         wantedBy = ["multi-user.target"];
-        after = [
-          "systemd-modules-load.service"
-          "systemd-udevd.service"
-          "sys-kernel-config.mount"
-        ];
-        requires = ["sys-kernel-config.mount"];
+        after = ["systemd-modules-load.service"];
+        unitConfig.RequiresMountsFor = "/sys/kernel/config";
         serviceConfig = {
           ExecStartPre = [
             "+${pkgs.systemd}/bin/udevadm trigger --settle --action=change --property-match=ID_VENDOR_ID=28de --property-match=ID_MODEL_ID=1304"
