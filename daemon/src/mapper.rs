@@ -5,7 +5,7 @@ use scd::{
     Error, Result,
     config::{
         Action, AxisActivation, AxisComponent, AxisMapping, AxisOptions, Binding, Config, Gamepad,
-        GamepadButton, GlobalAction, Mode, ModeId, MouseButton, Stick, Trigger, VectorTarget,
+        GamepadButton, GlobalAction, ModeId, MouseButton, Stick, Trigger, VectorTarget,
     },
     protocol::{Button, Buttons, ControllerState, Haptic, StateFormat, TouchpadState, Trackpad},
 };
@@ -86,24 +86,6 @@ pub enum GamepadAxis {
 }
 
 impl Mapper {
-    pub fn empty() -> Self {
-        Self::new(Config {
-            default_mode: ModeId(0),
-            mode_switch_haptic: None,
-            click_pressure: 25,
-            osk_bindings: IndexMap::new(),
-            global_bindings: Vec::new(),
-            mode_names: IndexMap::from([("".into(), ModeId(0))]),
-            modes: vec![Mode {
-                gamepad: Gamepad::None,
-                gamepad_touchpad: None,
-                bindings: Vec::new(),
-                axes: Vec::new(),
-                layers: Vec::new(),
-            }],
-        })
-    }
-
     pub fn new(config: Config) -> Self {
         let active_mode = config.default_mode;
         let global = vec![GlobalState::default(); config.global_bindings.len()];

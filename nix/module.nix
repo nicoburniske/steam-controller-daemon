@@ -9,7 +9,11 @@
     # expose the emulated wired controller to the graphical session
     SUBSYSTEM=="hidraw", KERNEL=="hidraw*", KERNELS=="0003:054C:09CC.*", TAG+="uaccess", GROUP:="input", MODE:="0660"
     # allow scd to claim the physical receiver while it runs
-    SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="28de", ATTR{idProduct}=="1304", TAG+="uaccess", GROUP:="scd", MODE:="0660"
+    SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="28de", ATTR{idProduct}=="1304", TAG-="uaccess", GROUP:="scd", MODE:="0660"
+  '';
+  # uaccess runs at 73, so clear stale receiver ACLs afterward
+  aclRules = pkgs.writeTextDir "lib/udev/rules.d/74-scd.rules" ''
+    ACTION!="remove", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ENV{DEVNAME}!="", ATTR{idVendor}=="28de", ATTR{idProduct}=="1304", RUN{program}+="${lib.getExe' pkgs.acl "setfacl"} --remove-all $env{DEVNAME}"
   '';
 in {
   options.services.scd = {
@@ -18,6 +22,10 @@ in {
       type = lib.types.package;
       default = pkgs.callPackage ./package.nix {};
       description = "The scd package to use.";
+    };
+    configFile = lib.mkOption {
+      type = lib.types.path;
+      description = "The Steam Controller configuration file.";
     };
     osk = {
       enable = lib.mkOption {
@@ -37,7 +45,10 @@ in {
     # provide the virtual usb host used by wired dualshock emulation
     boot.kernelModules = ["vhci_hcd"];
     hardware.uinput.enable = true;
-    services.udev.packages = [udevRules];
+    services.udev.packages = [
+      udevRules
+      aclRules
+    ];
     users = {
       groups = {
         scd = {};
@@ -65,7 +76,12 @@ in {
             # reapply receiver permissions when it was connected before startup
             "+${pkgs.systemd}/bin/udevadm trigger --settle --action=change --property-match=ID_VENDOR_ID=28de --property-match=ID_MODEL_ID=1304"
           ];
-          ExecStart = "${lib.getExe' cfg.package "scd"} --socket /run/scd/control.sock";
+          ExecStart = "${lib.getExe' cfg.package "scd"} --config ${cfg.configFile} --socket /run/scd/control.sock";
+          ExecStopPost = [
+            # revoke virtual usb control after shutdown
+            "+${pkgs.coreutils}/bin/chgrp root /sys/devices/platform/vhci_hcd.0/attach /sys/devices/platform/vhci_hcd.0/detach"
+            "+${pkgs.coreutils}/bin/chmod 0200 /sys/devices/platform/vhci_hcd.0/attach /sys/devices/platform/vhci_hcd.0/detach"
+          ];
           User = "scd";
           SupplementaryGroups = [
             "scd"
@@ -73,35 +89,8 @@ in {
           ];
           RuntimeDirectory = "scd";
           RuntimeDirectoryMode = "0770";
-          UMask = "0007";
           Restart = "on-failure";
           RestartSec = "1s";
-        };
-      };
-      user.paths.scd-config = {
-        description = "Watch the Steam Controller configuration";
-        wantedBy = [
-          "graphical-session.target"
-          "nixos-activation.service"
-        ];
-        partOf = ["graphical-session.target"];
-        pathConfig = {
-          PathChanged = "%E/scd/config.toml";
-          PathExists = "/run/scd/control.sock";
-        };
-      };
-      user.services.scd-config = {
-        description = "Apply the Steam Controller configuration";
-        wantedBy = [
-          "graphical-session.target"
-          "nixos-activation.service"
-        ];
-        partOf = ["graphical-session.target"];
-        after = ["nixos-activation.service"];
-        unitConfig.ConditionPathExists = "%E/scd/config.toml";
-        serviceConfig = {
-          Type = "oneshot";
-          ExecStart = "${lib.getExe' cfg.package "scctl"} config apply %E/scd/config.toml";
         };
       };
       user.services.scd-osk = lib.mkIf cfg.osk.enable {

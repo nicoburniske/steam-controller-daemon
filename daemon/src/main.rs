@@ -13,6 +13,7 @@ use output::Outputs;
 use scd::Result;
 use scd::config::{Config, Gamepad, is_keyboard_key};
 use scd::ipc::{OskPad, OskPadSide, OskState, Request, Response, Status};
+use std::fs;
 use std::path::PathBuf;
 use std::sync::{
     Arc,
@@ -24,18 +25,22 @@ use std::time::{Duration, Instant};
 #[derive(Parser)]
 #[command(version, about = "Steam Controller userspace daemon")]
 struct Args {
+    #[arg(long)]
+    config: PathBuf,
     #[arg(long, default_value = "/run/scd/control.sock")]
     socket: PathBuf,
 }
 
 fn main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
-    let Args { socket } = Args::parse();
+    let Args { config, socket } = Args::parse();
+    let config = Config::parse(&fs::read_to_string(config)?)?;
     let terminated = Arc::new(AtomicBool::new(false));
     signal_hook::flag::register(signal_hook::consts::SIGTERM, terminated.clone())?;
     signal_hook::flag::register(signal_hook::consts::SIGINT, terminated.clone())?;
     let mut device = DeviceManager::new()?;
-    let mut mapper = Mapper::empty();
+    device.set_trackpad_click_pressure(config.click_pressure);
+    let mut mapper = Mapper::new(config);
     let mut mapped = Vec::new();
     let mut outputs = Outputs::new(mapper.gamepad())?;
     let (mut ipc, commands) = Server::bind(socket)?;

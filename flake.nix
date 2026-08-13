@@ -37,7 +37,7 @@
           rustc
           rustfmt
         ];
-        buildInputs = [pkgs.udev];
+        buildInputs = [pkgs.libusb1];
         RUSTC_BOOTSTRAP = "1";
       };
     });
