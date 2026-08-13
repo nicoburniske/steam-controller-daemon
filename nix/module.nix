@@ -7,7 +7,7 @@
   cfg = config.services.scd;
   udevRules = pkgs.writeTextDir "lib/udev/rules.d/72-scd.rules" ''
     KERNEL=="uhid", OWNER:="root", GROUP:="scd", MODE:="0660"
-    SUBSYSTEM=="hidraw", KERNEL=="hidraw*", KERNELS=="0005:054C:09CC.*", TAG+="uaccess", GROUP:="input", MODE:="0660"
+    SUBSYSTEM=="hidraw", KERNEL=="hidraw*", KERNELS=="0005:054C:0CE6.*", TAG+="uaccess", GROUP:="input", MODE:="0660"
     SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="28de", ATTR{idProduct}=="1304", TAG-="uaccess", OWNER:="scd", GROUP:="scd-control", MODE:="0600"
     TEST!="/run/scd/steam-device", SUBSYSTEM=="hidraw", KERNEL=="hidraw*", ATTRS{idVendor}=="28de", ATTRS{idProduct}=="1304", OWNER:="root", GROUP:="scd", MODE:="0660"
     TEST!="/run/scd/steam-device", SUBSYSTEM=="tty", ATTRS{idVendor}=="28de", ATTRS{idProduct}=="1304", OWNER:="root", GROUP:="root", MODE:="0000"

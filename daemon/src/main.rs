@@ -243,7 +243,7 @@ fn main() -> Result<()> {
                 } => {
                     battery = Some(percent);
                     charging = Some(is_charging);
-                    outputs.set_gamepad_battery(percent);
+                    outputs.set_gamepad_battery(percent, is_charging);
                 }
                 DeviceEvent::Disconnected => {
                     outputs.set_gamepad(Gamepad::None)?;
