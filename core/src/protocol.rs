@@ -207,34 +207,28 @@ impl Buttons {
     }
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Hash)]
-#[serde(rename_all = "kebab-case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u32)]
 pub enum Button {
     A = 1 << 0,
     B = 1 << 1,
     X = 1 << 2,
     Y = 1 << 3,
-    #[serde(rename = "quick-access", alias = "qam")]
     Qam = 1 << 4,
-    #[serde(rename = "right-stick-click", alias = "r3")]
     R3 = 1 << 5,
     Menu = 1 << 6,
     R4 = 1 << 7,
     R5 = 1 << 8,
-    #[serde(rename = "right-bumper", alias = "rb")]
     Rb = 1 << 9,
     DpadDown = 1 << 10,
     DpadRight = 1 << 11,
     DpadLeft = 1 << 12,
     DpadUp = 1 << 13,
     View = 1 << 14,
-    #[serde(rename = "left-stick-click", alias = "l3")]
     L3 = 1 << 15,
     Steam = 1 << 16,
     L4 = 1 << 17,
     L5 = 1 << 18,
-    #[serde(rename = "left-bumper", alias = "lb")]
     Lb = 1 << 19,
     RightStickTouch = 1 << 20,
     RightPadTouch = 1 << 21,

@@ -933,22 +933,26 @@ mod tests {
     fn global_chord_is_ordered_consuming_and_edge_triggered() {
         let config = Config::parse(
             r#"
-                version = 1
-                default_mode = "desktop"
-                [global]
-                bind = [
-                    { input = ["steam", "x"], type = "keyboard-toggle" },
-                ]
-                [mode.desktop]
-                bind = [
-                    { input = "steam", type = "key", key = "super" },
-                    { input = "x", type = "key", key = "x" },
-                ]
-                [mode.desktop.layer.apps]
-                hold = "left-bumper"
-                bind = [
-                    { input = "x", type = "key", key = "t" },
-                ]
+            version 1
+            default-mode "desktop"
+            global {
+                bind "steam" "x" {
+                    keyboard-toggle
+                }
+            }
+            mode "desktop" {
+                bind "steam" {
+                    key "super"
+                }
+                bind "x" {
+                    key "x"
+                }
+                layer "apps" hold="left-bumper" {
+                    bind "x" {
+                        key "t"
+                    }
+                }
+            }
             "#,
         )
         .unwrap();
@@ -989,13 +993,16 @@ mod tests {
     fn mode_chord_consumes_fallback_and_releases_with_its_prerequisite() {
         let config = Config::parse(
             r#"
-                version = 1
-                default_mode = "desktop"
-                [mode.desktop]
-                bind = [
-                    { input = ["left-bumper", "x"], type = "key", key = "q" },
-                    { input = "x", type = "key", key = "x" },
-                ]
+            version 1
+            default-mode "desktop"
+            mode "desktop" {
+                bind "left-bumper" "x" {
+                    key "q"
+                }
+                bind "x" {
+                    key "x"
+                }
+            }
             "#,
         )
         .unwrap();
@@ -1030,23 +1037,23 @@ mod tests {
     fn keyboard_capture_suppresses_mode_outputs_without_repressing_held_controls() {
         let config = Config::parse(
             r#"
-                version = 1
-                default_mode = "desktop"
-                [osk.bind]
-                x = "backspace"
-                y = "space"
-                [global]
-                bind = [
-                    { input = ["steam", "x"], type = "keyboard-toggle" },
-                ]
-                [mode.desktop]
-                bind = [
-                    { input = "a", type = "key", key = "enter" },
-                ]
-                [[mode.desktop.axis]]
-                source = "right-pad"
-                target = "mouse-motion"
-                sensitivity = 100.0
+            version 1
+            default-mode "desktop"
+            osk {
+                bind "x" "backspace"
+                bind "y" "space"
+            }
+            global {
+                bind "steam" "x" {
+                    keyboard-toggle
+                }
+            }
+            mode "desktop" {
+                bind "a" {
+                    key "enter"
+                }
+                axis "right-pad" "mouse-motion" sensitivity=1e+2
+            }
             "#,
         )
         .unwrap();
@@ -1115,13 +1122,15 @@ mod tests {
     fn keyboard_controls_are_held_repeated_and_released_together() {
         let config = Config::parse(
             r#"
-                version = 1
-                default_mode = "desktop"
-                [osk.bind]
-                l4 = "shift"
-                left-trigger-click = "shift"
-                x = "backspace"
-                [mode.desktop]
+            version 1
+            default-mode "desktop"
+            osk {
+                bind "l4" "shift"
+                bind "left-trigger-click" "shift"
+                bind "x" "backspace"
+            }
+            mode "desktop" {
+            }
             "#,
         )
         .unwrap();
@@ -1178,19 +1187,24 @@ mod tests {
     fn layer_overrides_faces_inherits_and_orders_modifiers_first() {
         let config = Config::parse(
             r#"
-                version = 1
-                default_mode = "desktop"
-                [mode.desktop]
-                bind = [
-                    { input = "l4", type = "key", key = "super" },
-                    { input = "a", type = "key", key = "enter" },
-                    { input = "b", type = "key", key = "escape" },
-                ]
-                [mode.desktop.layer.apps]
-                hold = "left-bumper"
-                bind = [
-                    { input = "b", type = "key", key = "q" },
-                ]
+            version 1
+            default-mode "desktop"
+            mode "desktop" {
+                bind "l4" {
+                    key "super"
+                }
+                bind "a" {
+                    key "enter"
+                }
+                bind "b" {
+                    key "escape"
+                }
+                layer "apps" hold="left-bumper" {
+                    bind "b" {
+                        key "q"
+                    }
+                }
+            }
             "#,
         )
         .unwrap();
@@ -1227,22 +1241,23 @@ mod tests {
     fn routes_latch_and_layer_loss_quarantines_until_release() {
         let config = Config::parse(
             r#"
-                version = 1
-                default_mode = "desktop"
-                [mode.desktop]
-                bind = [
-                    { input = "b", type = "key", key = "escape" },
-                ]
-                [mode.desktop.layer.apps]
-                hold = "left-bumper"
-                bind = [
-                    { input = "b", type = "key", key = "q" },
-                ]
-                [mode.desktop.layer.navigation]
-                hold = "right-bumper"
-                bind = [
-                    { input = "b", type = "key", key = "o" },
-                ]
+            version 1
+            default-mode "desktop"
+            mode "desktop" {
+                bind "b" {
+                    key "escape"
+                }
+                layer "apps" hold="left-bumper" {
+                    bind "b" {
+                        key "q"
+                    }
+                }
+                layer "navigation" hold="right-bumper" {
+                    bind "b" {
+                        key "o"
+                    }
+                }
+            }
             "#,
         )
         .unwrap();
@@ -1300,19 +1315,27 @@ mod tests {
     fn lifecycle_releases_in_reverse_order_and_reference_counts() {
         let config = Config::parse(
             r#"
-                version = 1
-                default_mode = "one"
-                [mode.one]
-                gamepad = "xbox"
-                bind = [
-                    { input = "l4", type = "key", key = "super" },
-                    { input = "a", type = "key", key = "enter" },
-                    { input = "b", type = "key", key = "enter" },
-                    { input = "x", type = "mouse", button = "left" },
-                    { input = "y", type = "gamepad", button = "south" },
-                ]
-                [mode.two]
-                gamepad = "none"
+            version 1
+            default-mode "one"
+            mode "one" gamepad="xbox" {
+                bind "l4" {
+                    key "super"
+                }
+                bind "a" {
+                    key "enter"
+                }
+                bind "b" {
+                    key "enter"
+                }
+                bind "x" {
+                    mouse "left"
+                }
+                bind "y" {
+                    gamepad "south"
+                }
+            }
+            mode "two" gamepad="none" {
+            }
             "#,
         )
         .unwrap();
@@ -1397,14 +1420,11 @@ mod tests {
     fn touchpad_motion_and_acceleration_are_report_rate_independent() {
         let config = Config::parse(
             r#"
-                version = 1
-                default_mode = "one"
-                [mode.one]
-                [[mode.one.axis]]
-                source = "right-pad"
-                target = "mouse-motion"
-                sensitivity = 2.0
-                acceleration = 5.0
+            version 1
+            default-mode "one"
+            mode "one" {
+                axis "right-pad" "mouse-motion" sensitivity=2.0 acceleration=5.0
+            }
             "#,
         )
         .unwrap();
@@ -1437,18 +1457,15 @@ mod tests {
     fn gyro_activation_is_hysteretic_and_adds_to_stick() {
         let config = Config::parse(
             r#"
-                version = 1
-                default_mode = "one"
-                [mode.one]
-                [[mode.one.axis]]
-                source = "right-stick"
-                target = "gamepad-right-stick"
-                [[mode.one.axis]]
-                source = "gyro"
-                target = "gamepad-right-stick"
-                activation = { source = "left-trigger", engage = 0.15, release = 0.10 }
-                components = ["z", "x"]
-                sensitivity = 0.5
+            version 1
+            default-mode "one"
+            mode "one" {
+                axis "right-stick" "gamepad-right-stick"
+                axis "gyro" "gamepad-right-stick" sensitivity=0.5 {
+                    components "z" "x"
+                    trigger "left-trigger" engage=0.15 release=0.1
+                }
+            }
             "#,
         )
         .unwrap();
@@ -1485,14 +1502,11 @@ mod tests {
     fn circular_scroll_keeps_direction_across_wrap_and_ignores_center() {
         let config = Config::parse(
             r#"
-                version = 1
-                default_mode = "one"
-                [mode.one]
-                [[mode.one.axis]]
-                source = "left-pad"
-                target = "scroll"
-                sensitivity = 2.0
-                invert_y = true
+            version 1
+            default-mode "one"
+            mode "one" {
+                axis "left-pad" "scroll" sensitivity=2.0 invert-y=#true
+            }
             "#,
         )
         .unwrap();
@@ -1571,9 +1585,10 @@ mod tests {
 
         let config = Config::parse(
             r#"
-                version = 1
-                default_mode = "one"
-                [mode.one]
+            version 1
+            default-mode "one"
+            mode "one" {
+            }
             "#,
         )
         .unwrap();
@@ -1597,16 +1612,12 @@ mod tests {
     fn gyro_motion_uses_time_and_handles_timestamp_rollover() {
         let config = Config::parse(
             r#"
-                version = 1
-                default_mode = "one"
-                [mode.one]
-                [[mode.one.axis]]
-                source = "right-pad"
-                target = "mouse-motion"
-                [[mode.one.axis]]
-                source = "gyro"
-                target = "mouse-motion"
-                sensitivity = 100.0
+            version 1
+            default-mode "one"
+            mode "one" {
+                axis "right-pad" "mouse-motion"
+                axis "gyro" "mouse-motion" sensitivity=1e+2
+            }
             "#,
         )
         .unwrap();

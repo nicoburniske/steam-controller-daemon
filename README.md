@@ -10,7 +10,7 @@ expect rough edges and breaking changes
 
 ## features
 
-- declarative TOML configuration
+- declarative KDL configuration
   - validation
   - live reload
 - input mapping

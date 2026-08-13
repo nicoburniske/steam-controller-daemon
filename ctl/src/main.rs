@@ -165,7 +165,8 @@ fn main() -> scd::Result<()> {
         Command::Config {
             action: ConfigAction::Validate { path },
         } => {
-            Config::parse(&fs::read_to_string(path)?)?;
+            Config::parse(&fs::read_to_string(path)?)
+                .map_err(|error| scd::Error::message(format_args!("{error:?}")))?;
             println!("configuration is valid");
         }
     }

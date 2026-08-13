@@ -1,6 +1,7 @@
 pub mod config;
 mod error;
 pub mod ipc;
+pub mod kdl;
 pub mod protocol;
 
 pub use config::Config;

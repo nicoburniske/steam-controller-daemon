@@ -34,7 +34,8 @@ struct Args {
 fn main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     let Args { config, socket } = Args::parse();
-    let config = Config::parse(&fs::read_to_string(config)?)?;
+    let config = Config::parse(&fs::read_to_string(config)?)
+        .map_err(|error| scd::Error::message(format_args!("{error:?}")))?;
     let terminated = Arc::new(AtomicBool::new(false));
     signal_hook::flag::register(signal_hook::consts::SIGTERM, terminated.clone())?;
     signal_hook::flag::register(signal_hook::consts::SIGINT, terminated.clone())?;
@@ -80,7 +81,7 @@ fn main() -> Result<()> {
                         Response::Done
                     }
                     Err(error) => Response::Error {
-                        message: error.to_string(),
+                        message: format!("{error:?}"),
                     },
                 },
                 Request::ModeNext => {
