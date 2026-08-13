@@ -76,12 +76,12 @@ impl Outputs {
         if gamepad == self.gamepad_type {
             return Ok(());
         }
-        let device = match gamepad {
+        self.pending_rumble_stop |= self.gamepad.take().is_some();
+        self.gamepad_type = Gamepad::None;
+        self.gamepad = match gamepad {
             Gamepad::None => None,
             Gamepad::Xbox | Gamepad::DualShock4 => Some(VirtualGamepad::new(gamepad)?),
         };
-        self.pending_rumble_stop |= self.gamepad.is_some();
-        self.gamepad = device;
         self.gamepad_type = gamepad;
         Ok(())
     }
