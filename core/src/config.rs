@@ -1109,10 +1109,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_into_semantic_configuration() {
+    fn parses_configuration() {
         let config = Config::parse(
             r#"version 1
             default-mode "desktop"
+            mode-switch-haptic {
+                sweep gain=-2 duration-ms=65 start-frequency=400 end-frequency=850
+            }
             osk {
                 bind "l4" "super"
                 bind "left-trigger-click" "shift"
@@ -1134,140 +1137,135 @@ mod tests {
                         key "q"
                     }
                 }
-                axis "gyro" "mouse-motion" curve="exponential"
+                axis "left-pad" "gamepad-left-stick"
+                axis "right-pad" "mouse-motion"
+                axis "left-pad" "scroll"
+                axis "gyro" "gamepad-right-stick"
+                axis "gyro" "mouse-motion" deadzone=0.1 sensitivity=2.0 curve="exponential" exponent=3.0 invert-x=#true invert-y=#true swap-xy=#true {
+                    buttons "left-grip-touch" "right-grip-touch"
+                    components "z" "x"
+                }
             }
             mode "anything at all" gamepad="dualshock4" touchpad="right" {
             }"#,
         )
         .unwrap();
 
-        let desktop = config.mode_id("desktop").unwrap();
-        let other = config.mode_id("anything at all").unwrap();
-        let mode = config.mode(desktop);
-        assert_eq!(config.default_mode, desktop);
-        assert_eq!(config.mode_name(other), "anything at all");
-        assert_eq!(config.osk_bindings[&Button::L4], KeyCode::KEY_LEFTMETA);
-        assert_eq!(
-            config.osk_bindings[&Button::LeftTriggerClick],
-            KeyCode::KEY_LEFTSHIFT
-        );
-        assert_eq!(
-            config.global_bindings[0].inputs,
-            Buttons::from_bits(Button::Steam.mask() | Button::X.mask())
-        );
-        assert_eq!(config.global_bindings[0].trigger, Button::X);
-        assert_eq!(mode.gamepad, Gamepad::None);
-        assert_eq!(mode.gamepad_touchpad, None);
-        assert_eq!(mode.bindings[0].action, Action::Key(KeyCode::KEY_LEFTMETA));
-        assert_eq!(mode.bindings[1].action, Action::ModeSet(other));
-        assert_eq!(
-            mode.layers[0].bindings[0].action,
-            Action::Key(KeyCode::KEY_Q)
-        );
-        let AxisMapping::Gyro {
-            components,
-            options,
-            ..
-        } = mode.axes[0]
-        else {
-            panic!("expected gyro motion axis");
+        let options = VectorOptions {
+            axis: AxisOptions {
+                activation: None,
+                deadzone: 0.0,
+                sensitivity: 1.0,
+                exponent: 1.0,
+            },
+            invert_x: false,
+            invert_y: false,
+            swap_xy: false,
         };
-        assert_eq!(components, [AxisComponent::Y, AxisComponent::X]);
-        assert_eq!(options.axis.exponent, 2.0);
-        assert_eq!(config.mode(other).gamepad, Gamepad::DualShock4);
-        assert_eq!(config.mode(other).gamepad_touchpad, Some(Trackpad::Right));
-    }
-
-    #[test]
-    fn parses_axis_operations() {
-        let config = Config::parse(
-            r#"version 1
-            default-mode "one"
-            mode "one" {
-                axis "left-pad" "gamepad-left-stick"
-                axis "right-pad" "mouse-motion"
-                axis "left-pad" "scroll"
-                axis "gyro" "gamepad-right-stick"
-                axis "gyro" "mouse-motion"
-            }"#,
-        )
-        .unwrap();
-        assert!(matches!(
-            config.modes[0].axes.as_slice(),
-            [
-                AxisMapping::PadPosition {
-                    pad: Trackpad::Left,
-                    ..
-                },
-                AxisMapping::PadMotion {
-                    pad: Trackpad::Right,
-                    ..
-                },
-                AxisMapping::CircularScroll {
-                    pad: Trackpad::Left,
-                    ..
-                },
-                AxisMapping::Gyro {
-                    components: [AxisComponent::Y, AxisComponent::X],
-                    target: VectorTarget::GamepadRightStick,
-                    ..
-                },
-                AxisMapping::Gyro {
-                    components: [AxisComponent::Y, AxisComponent::X],
-                    target: VectorTarget::MouseMotion,
-                    ..
-                },
-            ]
-        ));
-    }
-
-    #[test]
-    fn parses_haptics_and_axis_options() {
-        let config = Config::parse(
-            r#"version 1
-            default-mode "one"
-            mode-switch-haptic {
-                sweep gain=-2 duration-ms=65 start-frequency=400 end-frequency=850
+        assert_eq!(
+            config,
+            Config {
+                default_mode: ModeId(0),
+                mode_switch_haptic: Some(Haptic::LogSweep {
+                    gain: -2,
+                    duration_ms: 65,
+                    start_frequency: 400,
+                    end_frequency: 850,
+                }),
+                click_pressure: 25,
+                osk_bindings: IndexMap::from([
+                    (Button::L4, KeyCode::KEY_LEFTMETA),
+                    (Button::LeftTriggerClick, KeyCode::KEY_LEFTSHIFT),
+                ]),
+                global_bindings: vec![GlobalBinding {
+                    inputs: Buttons::from_bits(Button::Steam.mask() | Button::X.mask()),
+                    trigger: Button::X,
+                    action: GlobalAction::KeyboardToggle,
+                }],
+                mode_names: IndexMap::from([
+                    ("desktop".into(), ModeId(0)),
+                    ("anything at all".into(), ModeId(1)),
+                ]),
+                modes: vec![
+                    Mode {
+                        gamepad: Gamepad::None,
+                        gamepad_touchpad: None,
+                        bindings: vec![
+                            Binding {
+                                inputs: Buttons::from_bits(Button::L4.mask()),
+                                trigger: Button::L4,
+                                action: Action::Key(KeyCode::KEY_LEFTMETA),
+                            },
+                            Binding {
+                                inputs: Buttons::from_bits(Button::X.mask()),
+                                trigger: Button::X,
+                                action: Action::ModeSet(ModeId(1)),
+                            },
+                        ],
+                        axes: vec![
+                            AxisMapping::PadPosition {
+                                pad: Trackpad::Left,
+                                target: Stick::Left,
+                                options,
+                            },
+                            AxisMapping::PadMotion {
+                                pad: Trackpad::Right,
+                                options,
+                                acceleration: 0.0,
+                            },
+                            AxisMapping::CircularScroll {
+                                pad: Trackpad::Left,
+                                options,
+                            },
+                            AxisMapping::Gyro {
+                                components: [AxisComponent::Y, AxisComponent::X],
+                                target: VectorTarget::GamepadRightStick,
+                                options,
+                            },
+                            AxisMapping::Gyro {
+                                components: [AxisComponent::Z, AxisComponent::X],
+                                target: VectorTarget::MouseMotion,
+                                options: VectorOptions {
+                                    axis: AxisOptions {
+                                        activation: Some(AxisActivation::Buttons(
+                                            Buttons::from_bits(
+                                                Button::LeftGripTouch.mask()
+                                                    | Button::RightGripTouch.mask(),
+                                            ),
+                                        )),
+                                        deadzone: 0.1,
+                                        sensitivity: 2.0,
+                                        exponent: 3.0,
+                                    },
+                                    invert_x: true,
+                                    invert_y: true,
+                                    swap_xy: true,
+                                },
+                            },
+                        ],
+                        layers: vec![Layer {
+                            hold: Button::Lb,
+                            bindings: vec![Binding {
+                                inputs: Buttons::from_bits(Button::B.mask()),
+                                trigger: Button::B,
+                                action: Action::Key(KeyCode::KEY_Q),
+                            }],
+                        }],
+                    },
+                    Mode {
+                        gamepad: Gamepad::DualShock4,
+                        gamepad_touchpad: Some(Trackpad::Right),
+                        bindings: vec![],
+                        axes: vec![],
+                        layers: vec![],
+                    },
+                ],
             }
-            mode "one" {
-                axis "gyro" "mouse-motion" deadzone=0.1 sensitivity=2.0 curve="exponential" exponent=3.0 invert-x=#true invert-y=#true swap-xy=#true {
-                    buttons "left-grip-touch" "right-grip-touch"
-                    components "z" "x"
-                }
-            }"#,
-        )
-        .unwrap();
-
-        assert_eq!(
-            config.mode_switch_haptic,
-            Some(Haptic::LogSweep {
-                gain: -2,
-                duration_ms: 65,
-                start_frequency: 400,
-                end_frequency: 850,
-            })
         );
-        let AxisMapping::Gyro {
-            components,
-            options,
-            ..
-        } = config.modes[0].axes[0]
-        else {
-            panic!("expected gyro mapping");
-        };
-        assert_eq!(components, [AxisComponent::Z, AxisComponent::X]);
-        assert!(matches!(
-            options.axis.activation,
-            Some(AxisActivation::Buttons(_))
-        ));
-        assert_eq!(options.axis.deadzone, 0.1);
-        assert_eq!(options.axis.sensitivity, 2.0);
-        assert_eq!(options.axis.exponent, 3.0);
-        assert!(options.invert_x && options.invert_y && options.swap_xy);
     }
 
     #[test]
-    fn aggregates_independent_errors() {
+    fn rejects_invalid_configuration() {
         let report = Config::parse(
             r#"version 2
             default-mode "missing"
@@ -1309,10 +1307,7 @@ mod tests {
                     .any(|issue| issue.message.contains(expected))
             );
         }
-    }
 
-    #[test]
-    fn rejects_invalid_digital_configuration() {
         for (body, expected) in [
             (
                 r#"global {
@@ -1386,19 +1381,9 @@ mod tests {
             ),
         ] {
             let source = format!("version 1\ndefault-mode \"one\"\n{body}");
-            let report = Config::parse(&source).unwrap_err();
-            let error = report.downcast_ref::<ConfigError>().unwrap();
-            assert!(
-                error
-                    .issues
-                    .iter()
-                    .any(|issue| issue.message.contains(expected))
-            );
+            assert_error(&source, expected);
         }
-    }
 
-    #[test]
-    fn rejects_invalid_analog_configuration() {
         for (mapping, expected) in [
             (
                 r#"axis "right-pad" "mouse-motion" acceleration=-1.0"#,
@@ -1417,19 +1402,9 @@ mod tests {
             ),
         ] {
             let source = format!("version 1\ndefault-mode \"one\"\nmode \"one\" {{\n{mapping}\n}}");
-            let report = Config::parse(&source).unwrap_err();
-            let error = report.downcast_ref::<ConfigError>().unwrap();
-            assert!(
-                error
-                    .issues
-                    .iter()
-                    .any(|issue| issue.message.contains(expected))
-            );
+            assert_error(&source, expected);
         }
-    }
 
-    #[test]
-    fn rejects_non_keyboard_key_codes() {
         for code in [
             "KEY_RESERVED",
             "BTN_LEFT",
@@ -1447,14 +1422,19 @@ mod tests {
                     }}
                 "#
             );
-            let report = Config::parse(&source).unwrap_err();
-            let error = report.downcast_ref::<ConfigError>().unwrap();
-            assert!(
-                error
-                    .issues
-                    .iter()
-                    .any(|issue| issue.message.contains("is not a keyboard key"))
-            );
+            assert_error(&source, "is not a keyboard key");
         }
+    }
+
+    fn assert_error(source: &str, expected: &str) {
+        let report = Config::parse(source).unwrap_err();
+        let error = report.downcast_ref::<ConfigError>().unwrap();
+        assert!(
+            error
+                .issues
+                .iter()
+                .any(|issue| issue.message.contains(expected)),
+            "expected an error containing {expected:?}"
+        );
     }
 }
