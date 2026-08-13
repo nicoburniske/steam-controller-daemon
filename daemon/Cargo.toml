@@ -12,7 +12,7 @@ evdev.workspace = true
 indexmap.workspace = true
 libc = "0.2"
 log.workspace = true
-rusb = "0.9"
+linux-raw-sys = { version = "0.12", features = ["ioctl"] }
 scd.workspace = true
 serde.workspace = true
 serde_json.workspace = true

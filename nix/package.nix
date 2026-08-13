@@ -1,7 +1,5 @@
 {
   lib,
-  libusb1,
-  pkg-config,
   rustPlatform,
 }:
 rustPlatform.buildRustPackage {
@@ -24,9 +22,6 @@ rustPlatform.buildRustPackage {
     lockFile = ../Cargo.lock;
     outputHashes."blit-0.1.0" = "sha256-YAac7/WoiC/xNGz+KIOOaqEH6240ml7mvJPIJU6Ew9k=";
   };
-  nativeBuildInputs = [pkg-config];
-  buildInputs = [libusb1];
-
   RUSTC_BOOTSTRAP = "1";
   meta = {
     description = "Steam Controller userspace daemon";

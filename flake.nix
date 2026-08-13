@@ -32,12 +32,10 @@
         packages = with pkgs; [
           cargo
           clippy
-          pkg-config
           rust-analyzer
           rustc
           rustfmt
         ];
-        buildInputs = [pkgs.libusb1];
         RUSTC_BOOTSTRAP = "1";
       };
     });

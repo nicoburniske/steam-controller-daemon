@@ -3,6 +3,7 @@ mod gamepad;
 mod ipc;
 mod mapper;
 mod output;
+mod usb;
 
 use clap::Parser;
 use device::{DeviceEvent, DeviceManager};
@@ -39,7 +40,7 @@ fn main() -> Result<()> {
     let terminated = Arc::new(AtomicBool::new(false));
     signal_hook::flag::register(signal_hook::consts::SIGTERM, terminated.clone())?;
     signal_hook::flag::register(signal_hook::consts::SIGINT, terminated.clone())?;
-    let mut device = DeviceManager::new()?;
+    let mut device = DeviceManager::new();
     device.set_trackpad_click_pressure(config.click_pressure);
     let mut mapper = Mapper::new(config);
     let mut mapped = Vec::new();
@@ -168,7 +169,7 @@ fn main() -> Result<()> {
             ipc.respond(command, response);
         }
 
-        if let Some(event) = device.poll()? {
+        if let Some(event) = device.poll() {
             match event {
                 DeviceEvent::State(state) => {
                     let was_visible = keyboard.visible;
