@@ -140,7 +140,7 @@ pub fn setup() -> Result<()> {
     )?;
     let no_out_endpoint = format!("{GADGET_PATH}/functions/hid.usb0/no_out_endpoint");
     if Path::new(&no_out_endpoint).exists() {
-        fs::write(no_out_endpoint, b"0")?;
+        fs::write(no_out_endpoint, b"1")?;
     }
     fs::write(
         format!("{GADGET_PATH}/functions/hid.usb0/report_desc"),
@@ -159,6 +159,9 @@ pub fn setup() -> Result<()> {
 
 pub fn unbind() -> Result<()> {
     if !Path::new(UDC_PATH).exists() {
+        return Ok(());
+    }
+    if fs::read_to_string(UDC_PATH)?.trim().is_empty() {
         return Ok(());
     }
     fs::write(UDC_PATH, b"\n")?;
@@ -529,12 +532,8 @@ impl DualShock4 {
 
 impl Drop for DualShock4 {
     fn drop(&mut self) {
-        if let Err(error) = fs::write(UDC_PATH, b"\n")
-            && error.kind() != io::ErrorKind::NotFound
-        {
+        if let Err(error) = unbind() {
             log::error!("failed to unbind DualShock USB gadget: {error}");
-        } else {
-            log::info!("unbound DualShock 4 wireless adapter");
         }
     }
 }
