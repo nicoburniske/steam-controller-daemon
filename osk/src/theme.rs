@@ -1,4 +1,4 @@
-use blit::color::Color;
+use blit_gui::color::Color;
 use scd::{
     Error,
     kdl::{FromKdl, FromKdlNode, Issue, KdlDocument, KdlEntry, KdlNode, issue, nodes, props},
@@ -145,7 +145,7 @@ impl ThemeColor {
     }
 
     pub const fn color(self) -> Color {
-        Color::from_rgba8(self.0[0], self.0[1], self.0[2], self.0[3])
+        Color::rgba(self.0[0], self.0[1], self.0[2], self.0[3])
     }
 }
 

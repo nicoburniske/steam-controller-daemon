@@ -1,36 +1,32 @@
 use crate::keyboard::{Half, Keyboard};
 use crate::theme::{Theme, ThemeColors};
 use blit::{
-    RepaintBuffer, Runtime,
-    animation::Easing,
-    color::Color,
-    geometry::{LogicalInsets, LogicalPoint, LogicalRect, LogicalSize, PhysicalRect},
-    input::Input,
-    interact::WidgetId,
-    keyboard::KeyboardRequest,
-    paint::{BoxShadow, HorizontalAlign, TextOptions, TextRequest, VerticalAlign},
-    paint_list::PaintList,
-    platform::PlatformImpl,
-    resource::{ImageData, ImageId, StringData, StringId},
-    widget::Button,
+    Easing, Frame, FrameInfo, Input, LogicalPoint, LogicalRect, Sides, Size, Widget, WidgetId,
 };
-use blit_cpu::{Argb8888, Font, FontFace, Renderer, RendererConfig, Scanline, VecBuffer};
+use blit_cpu::{Argb8888, Renderer, RendererConfig, Scanline, VecBuffer};
+use blit_gui::{
+    FontData, FontFamily, GuiContext, TextConfig, TextSystem, Ui,
+    atom::{Rectangle, Shadow},
+    color::Color,
+    layout::{Sizing, absolute, absolute::Anchor, flex, rect, single},
+    style::{Border, BorderRadius},
+    text::{HorizontalAlign, TextOptions, TextStyle, VerticalAlign},
+    widget::Text,
+};
 use evdev::KeyCode;
 use scd::{ControllerButton, Error, Result};
-use std::hash::Hash;
 use std::time::{Duration, Instant};
 
 const KEY_RADIUS: f32 = 1.0;
 const BORDER_WIDTH: f32 = 2.0;
 
 pub struct KeyboardRenderer {
-    runtime: Runtime<BlitPlatform>,
+    renderer: Renderer<VecBuffer<Argb8888>, Scanline>,
+    frame: Frame<GuiContext>,
+    context: GuiContext,
+    scale: u32,
     theme: Theme,
     started_at: Instant,
-}
-
-struct BlitPlatform {
-    renderer: Renderer<VecBuffer<Argb8888>, Scanline>,
 }
 
 #[derive(Clone, Copy)]
@@ -46,22 +42,28 @@ impl KeyboardRenderer {
         let [physical_width, physical_height] = scaled_size(width, height, scale)?;
         let renderer = Renderer::new(
             VecBuffer::new(physical_width as usize, physical_height as usize),
-            RendererConfig {
-                fonts: vec![FontFace {
-                    id: Default::default(),
-                    weight: 400,
-                    font: Font::from_owned(font)?,
-                }],
-                font_metric_cache_capacity: 256,
-                glyph_cache_capacity: 1024 * 1024,
-                paragraph_cache_capacity: 1024 * 1024,
-                shadow_cache_capacity: 1024 * 1024,
-            },
+            RendererConfig::default(),
         )
-        .with_scale_factor(scale as f32)
         .strategy(Scanline::default());
+        let text = TextSystem::new(
+            TextConfig {
+                fonts: vec![FontFamily {
+                    id: Default::default(),
+                    fonts: vec![FontData::Shared(font.into())],
+                }],
+                text_cache_capacity: 1024 * 1024,
+                layout_cache_capacity: 1024 * 1024,
+            },
+            blit_text_fontdue::Backend::new(),
+        )
+        .map_err(|error| Error::message(format_args!("could not load keyboard font: {error}")))?;
+        let mut context = GuiContext::new(text);
+        context.set_scale(scale as f32);
         Ok(Self {
-            runtime: Runtime::new(BlitPlatform { renderer }),
+            renderer,
+            frame: Frame::default(),
+            context,
+            scale,
             theme,
             started_at: Instant::now(),
         })
@@ -69,280 +71,156 @@ impl KeyboardRenderer {
 
     pub fn resize(&mut self, width: u32, height: u32, scale: u32) -> Result<()> {
         let [physical_width, physical_height] = scaled_size(width, height, scale)?;
-        let platform = self.runtime.platform();
-        let screen = platform.renderer.screen();
+        let screen = self.renderer.screen();
         if [screen.width as u32, screen.height as u32] == [physical_width, physical_height]
-            && platform.renderer.scale_factor() == scale as f32
+            && self.scale == scale
         {
             return Ok(());
         }
-        platform
-            .renderer
+        self.renderer
             .buffer_mut()
             .resize(physical_width as usize, physical_height as usize);
-        platform.renderer.set_scale_factor(scale as f32);
-        self.runtime.refresh_screen();
-        self.runtime.invalidate_all();
+        self.scale = scale;
+        self.context.set_scale(scale as f32);
+        self.renderer.invalidate_all();
         Ok(())
     }
 
     pub fn render(&mut self, keyboard: &Keyboard) {
         let time = self.started_at.elapsed();
         let colors = &self.theme.colors;
-        self.runtime.render(time, Input::None, |ui| {
-            let screen = ui.screen();
-            blit::paint::Rectangle::new(screen)
-                .background(colors.background.color())
-                .border(BORDER_WIDTH, colors.border.color())
-                .uniform_radius(KEY_RADIUS)
-                .replace(true)
-                .render(ui);
+        let [width, height] = self.physical_size();
+        self.frame.build(
+            &mut self.context,
+            FrameInfo::new(Size::new(
+                width as f32 / self.scale as f32,
+                height as f32 / self.scale as f32,
+            )),
+            time,
+            Input::None,
+            |ui: Ui<'_>| {
+                let screen = ui.screen();
+                let mut root = ui.layout(rect::new());
+                root.insert(
+                    Rectangle::new()
+                        .background(colors.background.color())
+                        .border(Border::solid(BORDER_WIDTH, colors.border.color()))
+                        .radius(BorderRadius::uniform(KEY_RADIUS)),
+                );
 
-            let bindings = keyboard.bindings();
-            let grid = screen.inset(LogicalInsets::uniform(BORDER_WIDTH));
-            let pointers = [Half::Left, Half::Right].map(|half| {
-                let inset_x = 19.0_f32.min(grid.width * 0.5);
-                let inset_y = 19.0_f32.min(grid.height * 0.5);
-                (
-                    half,
-                    keyboard
-                        .pointer(half)
-                        .and_then(|position| half.project(position))
-                        .map(|[x, y]| LogicalPoint {
-                            x: (grid.x + grid.width * x)
-                                .clamp(grid.x + inset_x, grid.x + grid.width - inset_x),
-                            y: (grid.y + grid.height * y)
-                                .clamp(grid.y + inset_y, grid.y + grid.height - inset_y),
-                        }),
-                )
-            });
+                let bindings = keyboard.bindings();
+                let grid = screen.inset(Sides::all(BORDER_WIDTH));
+                let pointers = [Half::Left, Half::Right].map(|half| {
+                    let inset_x = 19.0_f32.min(grid.width * 0.5);
+                    let inset_y = 19.0_f32.min(grid.height * 0.5);
+                    (
+                        half,
+                        keyboard
+                            .pointer(half)
+                            .and_then(|position| half.project(position))
+                            .map(|[x, y]| LogicalPoint {
+                                x: (grid.x + grid.width * x)
+                                    .clamp(grid.x + inset_x, grid.x + grid.width - inset_x),
+                                y: (grid.y + grid.height * y)
+                                    .clamp(grid.y + inset_y, grid.y + grid.height - inset_y),
+                            }),
+                    )
+                });
 
-            keyboard.for_each_key(
-                grid.width,
-                grid.height,
-                |slot, primary, secondary, target, [x, y, width, height], active, special| {
-                    let cell = LogicalRect {
-                        x: grid.x + x,
-                        y: grid.y + y,
-                        width,
-                        height,
+                keyboard.for_each_key(
+                    grid.width,
+                    grid.height,
+                    |slot, primary, secondary, target, [x, y, width, height], active, special| {
+                        let cell = LogicalRect {
+                            x: grid.x + x,
+                            y: grid.y + y,
+                            width,
+                            height,
+                        };
+                        let hovered = pointers.iter().any(|(_, pointer)| {
+                            pointer.is_some_and(|pointer| cell.contains(pointer))
+                        });
+                        let pressed = pointers.iter().any(|(half, pointer)| {
+                            pointer.is_some_and(|pointer| cell.contains(pointer))
+                                && keyboard.pressed(*half)
+                        });
+                        let hint = target.and_then(|target| {
+                            bindings
+                                .iter()
+                                .filter(|(_, configured)| {
+                                    *configured == target
+                                        || target == KeyCode::KEY_LEFTSHIFT
+                                            && matches!(
+                                                *configured,
+                                                KeyCode::KEY_LEFTSHIFT | KeyCode::KEY_RIGHTSHIFT
+                                            )
+                                })
+                                .filter_map(|(input, _)| ControllerHint::from(input))
+                                .min_by_key(|hint| match hint {
+                                    ControllerHint::Face(_) => 0,
+                                    ControllerHint::Trigger(_) => 1,
+                                    ControllerHint::Paddle(_) => 2,
+                                    ControllerHint::Control(_) => 3,
+                                })
+                        });
+                        root.child()
+                            .item(cell.inset(Sides::all(2.0)))
+                            .widget_id(WidgetId::new(("key", slot)))
+                            .build(KeyView {
+                                primary,
+                                secondary,
+                                colors,
+                                hint,
+                                special,
+                                hovered,
+                                pressed,
+                                active,
+                                left_side: cell.x + cell.width * 0.5 < grid.x + grid.width * 0.5,
+                            });
+                    },
+                );
+
+                for (_, pointer) in pointers {
+                    let Some(pointer) = pointer else {
+                        continue;
                     };
-                    let hovered = pointers.iter().any(|(_, pointer)| {
-                        pointer.is_some_and(|pointer| cell.contains(pointer.x, pointer.y))
-                    });
-                    let pressed = pointers.iter().any(|(half, pointer)| {
-                        pointer.is_some_and(|pointer| cell.contains(pointer.x, pointer.y))
-                            && keyboard.pressed(*half)
-                    });
-                    let background = if hovered {
-                        colors.hover.color()
-                    } else if special && primary != "Space" {
-                        colors.special.color()
-                    } else {
-                        colors.key.color()
-                    };
-                    let press = ui
-                        .animate(
-                            WidgetId::new(("key press", slot)),
-                            f32::from(pressed || active),
-                            if pressed || active {
-                                Duration::from_millis(45)
-                            } else {
-                                Duration::from_millis(110)
-                            },
-                            Easing::EaseOutQuad,
-                        )
-                        .value()
-                        .clamp(0.0, 1.0);
-                    let pressed_color = colors.pressed.color();
-                    let background = Color::from_rgba8(
-                        (background.red as f32 * (1.0 - press) + pressed_color.red as f32 * press)
-                            .round() as u8,
-                        (background.green as f32 * (1.0 - press)
-                            + pressed_color.green as f32 * press)
-                            .round() as u8,
-                        (background.blue as f32 * (1.0 - press) + pressed_color.blue as f32 * press)
-                            .round() as u8,
-                        (background.alpha as f32 * (1.0 - press)
-                            + pressed_color.alpha as f32 * press)
-                            .round() as u8,
-                    );
-                    let text = if hovered && press < 0.35 {
-                        colors.key.color()
-                    } else if press >= 0.35 {
-                        colors.pressed_foreground.color()
-                    } else {
-                        colors.foreground.color()
-                    };
-                    let inset = 2.0;
-                    let key = LogicalRect {
-                        x: cell.x + inset,
-                        y: cell.y + inset,
-                        width: (cell.width - inset * 2.0).max(0.0),
-                        height: (cell.height - inset * 2.0).max(0.0),
-                    };
-                    let hint = target.and_then(|target| {
-                        bindings
-                            .iter()
-                            .filter(|(_, configured)| {
-                                *configured == target
-                                    || target == KeyCode::KEY_LEFTSHIFT
-                                        && matches!(
-                                            *configured,
-                                            KeyCode::KEY_LEFTSHIFT | KeyCode::KEY_RIGHTSHIFT
-                                        )
-                            })
-                            .filter_map(|(input, _)| {
-                                ControllerHint::from(input).map(|hint| (input, hint))
-                            })
-                            .min_by_key(|(_, hint)| match hint {
-                                ControllerHint::Face(_) => 0,
-                                ControllerHint::Trigger(_) => 1,
-                                ControllerHint::Paddle(_) => 2,
-                                ControllerHint::Control(_) => 3,
-                            })
-                    });
-                    let left_side = key.x + key.width * 0.5 < grid.x + grid.width * 0.5;
-                    let text_options = TextOptions {
-                        horizontal_align: if special && primary != "Space" {
-                            if left_side {
-                                HorizontalAlign::Left
-                            } else {
-                                HorizontalAlign::Right
-                            }
-                        } else {
-                            HorizontalAlign::Center
-                        },
-                        vertical_align: if secondary.is_some() {
-                            VerticalAlign::Bottom
-                        } else {
-                            VerticalAlign::Center
-                        },
-                        ..Default::default()
-                    };
-                    Button::new(primary)
-                        .id(slot)
-                        .background(background)
-                        .text_color(if primary == "Space" {
-                            Color::TRANSPARENT
-                        } else {
-                            text
-                        })
-                        .uniform_radius(KEY_RADIUS)
-                        .padding_x(if special { 10.0 } else { 2.0 })
-                        .padding_y(if secondary.is_some() { 7.0 } else { 2.0 })
-                        .text_size(if special { 17.0 } else { 22.0 })
-                        .text_options(text_options)
-                        .render(ui, key);
-                    if press > 0.0 {
-                        let shadow = colors.shadow.color();
-                        let mut clip = ui.begin_clip(key);
-                        BoxShadow::new(
-                            LogicalRect {
-                                x: key.x - 10.0,
-                                y: key.y - 8.0,
-                                width: key.width + 20.0,
-                                height: 10.0,
-                            },
-                            Color::from_rgba8(
-                                shadow.red,
-                                shadow.green,
-                                shadow.blue,
-                                (shadow.alpha as f32 * press * (230.0 / 255.0)).round() as u8,
-                            ),
-                        )
-                        .blur(10.0)
-                        .render(&mut clip);
-                    }
-                    if let Some(secondary) = secondary {
-                        Button::new(secondary)
-                            .id((slot, "secondary"))
-                            .background(Color::TRANSPARENT)
-                            .text_color(if hovered && !pressed && !active {
-                                colors.dim.color()
-                            } else {
-                                colors.muted.color()
-                            })
-                            .padding_y(0.0)
-                            .text_size(14.0)
-                            .text_options(TextOptions {
-                                horizontal_align: HorizontalAlign::Center,
-                                vertical_align: VerticalAlign::Center,
-                                ..Default::default()
-                            })
-                            .render(
-                                ui,
-                                LogicalRect {
-                                    x: key.x,
-                                    y: key.y + 1.0,
-                                    width: key.width,
-                                    height: key.height * 0.42,
-                                },
+                    for (diameter, color, opacity) in [
+                        (35.0, colors.hint_control.color(), 0.84),
+                        (24.0, colors.pressed.color(), 1.0),
+                    ] {
+                        root.child()
+                            .item(LogicalRect::new(
+                                pointer.x - diameter / 2.0,
+                                pointer.y - diameter / 2.0,
+                                diameter,
+                                diameter,
+                            ))
+                            .insert(
+                                Rectangle::new()
+                                    .background(color)
+                                    .radius(BorderRadius::uniform(diameter / 2.0))
+                                    .opacity(opacity),
                             );
                     }
-                    if let Some((input, hint)) = hint {
-                        let hint_width = hint.width();
-                        render_hint(
-                            ui,
-                            colors,
-                            hint,
-                            (slot, input),
-                            LogicalRect {
-                                x: if primary == "Space" {
-                                    key.x + 8.0
-                                } else if left_side {
-                                    key.x + key.width - hint_width - 8.0
-                                } else {
-                                    key.x + 8.0
-                                },
-                                y: key.y + (key.height - 24.0) * 0.5,
-                                width: hint_width,
-                                height: 24.0,
-                            },
-                        );
-                    }
-                },
-            );
-
-            for (_, pointer) in pointers {
-                let Some(pointer) = pointer else {
-                    continue;
-                };
-                let diameter = 35.0;
-                blit::paint::Rectangle::new(LogicalRect {
-                    x: pointer.x - diameter / 2.0,
-                    y: pointer.y - diameter / 2.0,
-                    width: diameter,
-                    height: diameter,
-                })
-                .background(colors.hint_control.color())
-                .uniform_radius(diameter / 2.0)
-                .opacity(0.84)
-                .render(ui);
-                let center = 24.0;
-                blit::paint::Rectangle::new(LogicalRect {
-                    x: pointer.x - center / 2.0,
-                    y: pointer.y - center / 2.0,
-                    width: center,
-                    height: center,
-                })
-                .background(colors.pressed.color())
-                .uniform_radius(center / 2.0)
-                .render(ui);
-            }
-        });
+                }
+            },
+        );
+        self.frame.layout(&mut self.context);
+        self.frame.paint(&mut self.context);
+        self.renderer.render(self.context.render_input());
+        self.context.finish_frame();
     }
 
     pub fn animation_pending(&self) -> bool {
-        self.runtime.has_pending_redraw()
+        self.frame.has_pending_redraw()
     }
 
-    pub fn pixels(&mut self) -> &[Argb8888] {
-        self.runtime.platform().renderer.buffer().pixels()
+    pub fn pixels(&self) -> &[Argb8888] {
+        self.renderer.buffer().pixels()
     }
 
-    pub fn physical_size(&mut self) -> [u32; 2] {
-        let screen = self.runtime.platform().renderer.screen();
+    pub fn physical_size(&self) -> [u32; 2] {
+        let screen = self.renderer.screen();
         [screen.width as u32, screen.height as u32]
     }
 }
@@ -396,118 +274,174 @@ impl ControllerHint {
             ControllerButton::LeftGripTouch => Self::Control("LGT"),
         })
     }
-
-    fn width(self) -> f32 {
-        match self {
-            Self::Face(_) => 24.0,
-            Self::Trigger(_) | Self::Paddle(_) => 36.0,
-            Self::Control(_) => 44.0,
-        }
-    }
 }
 
-fn render_hint(
-    ui: &mut blit::Ui,
-    colors: &ThemeColors,
-    hint: ControllerHint,
-    id: impl Hash,
-    area: LogicalRect,
-) {
-    let (label, background, text, radius, border) = match hint {
-        ControllerHint::Face(label) => (
-            label,
-            colors.pressed.color(),
-            colors.pressed_foreground.color(),
-            12.0,
-            2.0,
-        ),
-        ControllerHint::Trigger(label) => {
-            (label, colors.hover.color(), colors.key.color(), 4.0, 0.0)
-        }
-        ControllerHint::Paddle(label) => (
-            label,
-            colors.hint_paddle.color(),
-            colors.foreground.color(),
-            4.0,
-            0.0,
-        ),
-        ControllerHint::Control(label) => (
-            label,
-            colors.hint_control.color(),
-            colors.foreground.color(),
-            4.0,
-            0.0,
-        ),
-    };
-    Button::new(label)
-        .id(id)
-        .background(background)
-        .border(border, colors.key.color())
-        .text_color(text)
-        .uniform_radius(radius)
-        .padding_x(0.0)
-        .padding_y(0.0)
-        .text_size(11.0)
-        .text_options(TextOptions {
-            horizontal_align: HorizontalAlign::Center,
-            vertical_align: VerticalAlign::Center,
-            ..Default::default()
-        })
-        .render(ui, area);
+struct KeyView<'a> {
+    primary: &'static str,
+    secondary: Option<&'static str>,
+    colors: &'a ThemeColors,
+    hint: Option<ControllerHint>,
+    special: bool,
+    hovered: bool,
+    pressed: bool,
+    active: bool,
+    left_side: bool,
 }
 
-impl PlatformImpl for BlitPlatform {
-    fn render(&mut self, paint: &PaintList, damage: &[PhysicalRect]) {
-        self.renderer.render(paint, damage);
-    }
+impl Widget<GuiContext> for KeyView<'_> {
+    type Response = ();
 
-    fn screen(&mut self) -> PhysicalRect {
-        self.renderer.screen()
+    fn build(self, mut ui: Ui<'_>) {
+        let colors = self.colors;
+        let press = ui
+            .animate(
+                ui.current_widget_id(),
+                f32::from(self.pressed || self.active),
+                Duration::from_millis(if self.pressed || self.active { 45 } else { 110 }),
+                Easing::EaseOutQuad,
+            )
+            .clamp(0.0, 1.0);
+        let background = if self.hovered {
+            colors.hover.color()
+        } else if self.special && self.primary != "Space" {
+            colors.special.color()
+        } else {
+            colors.key.color()
+        };
+        let pressed = colors.pressed.color();
+        let [r, g, b, a] = [
+            (background.red, pressed.red),
+            (background.green, pressed.green),
+            (background.blue, pressed.blue),
+            (background.alpha, pressed.alpha),
+        ]
+        .map(|(from, to)| (from as f32 * (1.0 - press) + to as f32 * press).round() as u8);
+        let text = if self.primary == "Space" {
+            Color::TRANSPARENT
+        } else if self.hovered && press < 0.35 {
+            colors.key.color()
+        } else if press >= 0.35 {
+            colors.pressed_foreground.color()
+        } else {
+            colors.foreground.color()
+        };
+        let radius = BorderRadius::uniform(KEY_RADIUS);
+        let centered = TextOptions::new()
+            .horizontal_align(HorizontalAlign::Center)
+            .vertical_align(VerticalAlign::Center);
+        let mut key = ui.layout(flex::column());
+        key.insert(
+            Rectangle::new()
+                .background(Color::rgba(r, g, b, a))
+                .radius(radius),
+        );
+        if press > 0.0 {
+            let mut shadow = colors.shadow.color();
+            shadow.alpha = (shadow.alpha as f32 * press * (230.0 / 255.0)).round() as u8;
+            key.insert(
+                Shadow::new(shadow)
+                    .radius(radius)
+                    .offset(0.0, 8.0)
+                    .blur(10.0)
+                    .inset(true),
+            );
+        }
+        if let Some(secondary) = self.secondary {
+            key.child()
+                .item(
+                    flex::item()
+                        .width(Sizing::grow())
+                        .height(Sizing::percent(0.42)),
+                )
+                .insert(
+                    Text::new(secondary)
+                        .color(if self.hovered && !self.pressed && !self.active {
+                            colors.dim.color()
+                        } else {
+                            colors.muted.color()
+                        })
+                        .style(TextStyle::new().size(14.0))
+                        .options(centered),
+                );
+        }
+        let mut label = key
+            .child()
+            .item(flex::item().grow())
+            .layout(single::new().grow().padding(Sides::xy(
+                if self.special { 10.0 } else { 2.0 },
+                if self.secondary.is_some() { 7.0 } else { 2.0 },
+            )));
+        label.child().insert(
+            Text::new(self.primary)
+                .color(text)
+                .style(TextStyle::new().size(if self.special { 17.0 } else { 22.0 }))
+                .options(
+                    centered
+                        .horizontal_align(if !self.special || self.primary == "Space" {
+                            HorizontalAlign::Center
+                        } else if self.left_side {
+                            HorizontalAlign::Left
+                        } else {
+                            HorizontalAlign::Right
+                        })
+                        .vertical_align(if self.secondary.is_some() {
+                            VerticalAlign::Bottom
+                        } else {
+                            VerticalAlign::Center
+                        }),
+                ),
+        );
+        drop(label);
+        if let Some(hint) = self.hint {
+            let (label, background, text, width) = match hint {
+                ControllerHint::Face(label) => (
+                    label,
+                    colors.pressed.color(),
+                    colors.pressed_foreground.color(),
+                    24.0,
+                ),
+                ControllerHint::Trigger(label) => {
+                    (label, colors.hover.color(), colors.key.color(), 36.0)
+                }
+                ControllerHint::Paddle(label) => (
+                    label,
+                    colors.hint_paddle.color(),
+                    colors.foreground.color(),
+                    36.0,
+                ),
+                ControllerHint::Control(label) => (
+                    label,
+                    colors.hint_control.color(),
+                    colors.foreground.color(),
+                    44.0,
+                ),
+            };
+            let face = matches!(hint, ControllerHint::Face(_));
+            let left = self.primary == "Space" || !self.left_side;
+            let anchor = if left { Anchor::Left } else { Anchor::Right };
+            let mut badge = key.child().layout(
+                absolute::place(single::new().grow())
+                    .target_anchor(anchor)
+                    .child_anchor(anchor)
+                    .x(if left { 8.0 } else { -8.0 })
+                    .width(absolute::Sizing::fixed(width))
+                    .height(absolute::Sizing::fixed(24.0)),
+            );
+            badge.insert(
+                Rectangle::new()
+                    .background(background)
+                    .border(Border::solid(
+                        if face { 2.0 } else { 0.0 },
+                        colors.key.color(),
+                    ))
+                    .radius(BorderRadius::uniform(if face { 12.0 } else { 4.0 })),
+            );
+            badge.child().insert(
+                Text::new(label)
+                    .color(text)
+                    .style(TextStyle::new().size(11.0))
+                    .options(centered),
+            );
+        }
     }
-
-    fn scale_factor(&mut self) -> f32 {
-        self.renderer.scale_factor()
-    }
-
-    fn repaint_buffer(&self) -> RepaintBuffer {
-        RepaintBuffer::Reused
-    }
-
-    fn create_image(&mut self, data: ImageData) -> ImageId {
-        self.renderer.create_image(data)
-    }
-
-    fn drop_image(&mut self, image: ImageId) {
-        self.renderer.drop_image(image);
-    }
-
-    fn create_string(&mut self, string: StringData) -> StringId {
-        self.renderer.create_string(string)
-    }
-
-    fn drop_string(&mut self, string: StringId) {
-        self.renderer.drop_string(string);
-    }
-
-    fn string(&self, string: StringId) -> &str {
-        self.renderer.string(string)
-    }
-
-    fn text_offset_at_position(&mut self, request: &TextRequest, position: LogicalPoint) -> usize {
-        self.renderer.text_offset_at_position(request, position)
-    }
-
-    fn measure_text(&mut self, request: &TextRequest) -> LogicalSize {
-        self.renderer.measure_text(request)
-    }
-
-    fn measure_text_height(&mut self, request: &TextRequest) -> f32 {
-        self.renderer.measure_text_height(request)
-    }
-
-    fn text_cursor_rect(&mut self, request: &TextRequest, byte_offset: usize) -> LogicalRect {
-        self.renderer.text_cursor_rect(request, byte_offset)
-    }
-
-    fn show_keyboard(&mut self, _: &KeyboardRequest<'_>) {}
 }

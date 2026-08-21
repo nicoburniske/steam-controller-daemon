@@ -20,7 +20,7 @@ rustPlatform.buildRustPackage {
 
   cargoLock = {
     lockFile = ../Cargo.lock;
-    outputHashes."blit-0.1.0" = "sha256-YAac7/WoiC/xNGz+KIOOaqEH6240ml7mvJPIJU6Ew9k=";
+    outputHashes."blit-0.1.0" = "sha256-/TFeyBCz9gcJG6tXX4QEUIgrdaKTYsHG6p+AjfizCIw=";
   };
   RUSTC_BOOTSTRAP = "1";
   meta = {
