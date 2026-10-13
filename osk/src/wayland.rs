@@ -231,10 +231,8 @@ impl State {
     }
 
     fn hide(&mut self) {
-        if let Some(layer) = &self.layer {
-            layer.wl_surface().attach(None, 0, 0);
-            layer.commit();
-        }
+        self.layer = None;
+        self.buffer = None;
         self.configured = false;
         self.frame_pending = false;
         self.redraw_pending = false;
@@ -389,11 +387,11 @@ impl CompositorHandler for State {
 }
 
 impl LayerShellHandler for State {
-    fn closed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &LayerSurface) {
-        self.layer = None;
-        self.buffer = None;
-        self.configured = false;
-        self.frame_pending = false;
+    fn closed(&mut self, _: &Connection, _: &QueueHandle<Self>, layer: &LayerSurface) {
+        if self.layer.as_ref() != Some(layer) {
+            return;
+        }
+        self.hide();
         self.redraw_pending = self.keyboard.visible();
     }
 
@@ -401,11 +399,11 @@ impl LayerShellHandler for State {
         &mut self,
         _: &Connection,
         _: &QueueHandle<Self>,
-        _: &LayerSurface,
+        layer: &LayerSurface,
         configure: LayerSurfaceConfigure,
         _: u32,
     ) {
-        if !self.keyboard.visible() {
+        if self.layer.as_ref() != Some(layer) || !self.keyboard.visible() {
             return;
         }
         let width = if configure.new_size.0 == 0 {
